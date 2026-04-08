@@ -1,0 +1,33 @@
+{
+  "name": "@people1/n8n-nodes-bedrock-advanced",
+  "version": "0.5.2-p1.1",
+  "description": "People1 fork of n8n-nodes-bedrock-advanced — fixes cache token metrics propagation to node output",
+  "keywords": [
+    "n8n-community-node-package",
+    "aws",
+    "bedrock",
+    "prompt-caching"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "People1 (fork of Amir Souchami's original)"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/franlealp1/n8n-nodes-bedrock-advanced-p1"
+  },
+  "main": "dist/index.js",
+  "scripts": {},
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "nodes": [
+      "dist/nodes/LmChatAwsBedrockAdvanced/LmChatAwsBedrockAdvanced.node.js",
+      "dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js"
+    ]
+  }
+}
