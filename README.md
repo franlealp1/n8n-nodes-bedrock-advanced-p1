@@ -8,13 +8,27 @@ The original node extracts Bedrock prompt cache metrics (`cacheReadInputTokens`,
 
 This fork fixes that: cache metrics now appear in the standard N8N execution output and can be queried via the REST API (`GET /api/v1/executions/{id}`) by any developer.
 
+## Coexistence with the original
+
+This fork uses **different internal node type names** so it can be installed alongside the original:
+
+| | Original | Fork (P1) |
+|---|---|---|
+| **Converse API node** | `AWS Bedrock Chat Model (Advanced)` | `AWS Bedrock Chat Model (Advanced P1)` |
+| **InvokeModel node** | `Bedrock Claude` | `Bedrock Claude (P1)` |
+| **Internal type** | `lmChatAwsBedrockAdvanced` | `lmChatAwsBedrockAdvancedP1` |
+| **Internal type** | `lmChatBedrockClaude` | `lmChatBedrockClaudeP1` |
+
+Both appear in the N8N node picker. Developers choose which to use per workflow.
+
 ## What changed
 
-Three patches applied to both nodes (`LmChatAwsBedrockAdvanced` + `LmChatBedrockClaude`):
+Patches applied to both nodes:
 
 1. **Added cache fields to `llmOutput.tokenUsage`** — so cache metrics travel through LangChain's callback chain
 2. **Custom `tokensUsageParser` for `N8nLlmTracing`** — so N8N's tracing callback preserves cache fields instead of stripping them
 3. **Streaming path fix** (BedrockClaude only) — reads cache metrics from `response_metadata.usage` for the streaming aggregation path
+4. **Renamed node types** — `P1` suffix to coexist with the original package
 
 ### Output format (after fix)
 
@@ -40,37 +54,24 @@ When cache is disabled or not applicable, `cacheReadInputTokens` and `cacheWrite
 # 1. Find the N8N main container
 docker ps --format '{{.Names}}' | grep n8n
 
-# 2. Install the fork (replace CONTAINER with actual name)
+# 2. Install the fork alongside the original (replace CONTAINER)
 docker exec CONTAINER sh -c "cd /home/node/.n8n/nodes && npm install github:franlealp1/n8n-nodes-bedrock-advanced-p1"
 
-# 3. Restart N8N to pick up the new node
+# 3. Restart N8N to pick up the new nodes
 docker restart CONTAINER
 ```
 
-### Replacing the original node
-
-If `n8n-nodes-bedrock-advanced` is already installed:
-
-```bash
-# Remove original
-docker exec CONTAINER sh -c "cd /home/node/.n8n/nodes && npm uninstall n8n-nodes-bedrock-advanced"
-
-# Install fork
-docker exec CONTAINER sh -c "cd /home/node/.n8n/nodes && npm install github:franlealp1/n8n-nodes-bedrock-advanced-p1"
-
-# Restart
-docker restart CONTAINER
-```
-
-> **Note:** The fork uses the same internal node type names (`lmChatAwsBedrockAdvanced`, `lmChatBedrockClaude`), so existing workflows will work without changes.
+Both the original and P1 nodes will appear in the node picker.
 
 ### Persisting across Coolify deploys
 
-Add to the N8N service's startup command or post-deploy hook in Coolify:
+Add to the N8N service's **Custom Start Command** in Coolify:
 
 ```bash
-cd /home/node/.n8n/nodes && npm install github:franlealp1/n8n-nodes-bedrock-advanced-p1
+cd /home/node/.n8n/nodes && npm install github:franlealp1/n8n-nodes-bedrock-advanced-p1 && cd / && n8n start
 ```
+
+Or in a **post-deploy script** if available.
 
 ## Querying cache metrics (developers)
 
@@ -97,10 +98,8 @@ for node_name, node_data in data.get('data', {}).get('resultData', {}).get('runD
 
 All features from the original node are preserved:
 
-- **AWS Bedrock Chat Model (Advanced)** — Converse API, multi-model, prompt caching (system/tools/history), configurable TTL
-- **Bedrock Claude** — InvokeModel API, Claude-specific features (web search, computer use, bash, text editor, tool search, programmatic tool calling, 1M context, context compaction)
-
-See the original README sections in [CHANGELOG.md](CHANGELOG.md) for full feature documentation.
+- **AWS Bedrock Chat Model (Advanced P1)** — Converse API, multi-model, prompt caching (system/tools/history), configurable TTL
+- **Bedrock Claude (P1)** — InvokeModel API, Claude-specific features (web search, computer use, bash, text editor, tool search, programmatic tool calling, 1M context, context compaction)
 
 ## License
 
