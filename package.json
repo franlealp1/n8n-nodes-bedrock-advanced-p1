@@ -1,6 +1,6 @@
 {
-  "name": "@people1/n8n-nodes-bedrock-advanced",
-  "version": "0.5.2-p1.2",
+  "name": "n8n-nodes-bedrock-advanced-p1",
+  "version": "0.5.2",
   "description": "People1 fork of n8n-nodes-bedrock-advanced — cache metrics in output, coexists with original",
   "keywords": [
     "n8n-community-node-package",
