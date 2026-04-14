@@ -132,9 +132,18 @@ export class ChatBedrockClaude extends BaseChatModel {
 	//                       Anthropic conversion so tool_use blocks get cache_control too)
 	private findHistoryCacheTarget(messages: BaseMessage[]): number {
 		for (let i = messages.length - 2; i >= 0; i--) {
-			const type = messages[i].getType();
+			const msg = messages[i];
+			const type = msg.getType();
 			if (type === 'system') break;
 			if (type === 'tool') continue;
+			// Skip AI messages with empty/placeholder content — caching them fails
+			if (type === 'ai') {
+				const content = msg.content;
+				const hasSubstantialContent =
+					(typeof content === 'string' && content.trim().length > 0) ||
+					(Array.isArray(content) && content.length > 0);
+				if (!hasSubstantialContent) continue;
+			}
 			return i; // 'human' or 'ai'
 		}
 		return -1;

@@ -458,10 +458,19 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 
 			private findHistoryCacheTarget(messages: any[]): number {
 				for (let i = messages.length - 2; i >= 0; i--) {
-					const msgType = messages[i]._getType?.() ?? messages[i].getType?.();
+					const msg = messages[i];
+					const msgType = msg._getType?.() ?? msg.getType?.();
 					if (msgType === 'system') break;
 					if (msgType === 'tool') continue;
-					if (msgType === 'ai' && messages[i].tool_calls?.length > 0) continue;
+					if (msgType === 'ai' && msg.tool_calls?.length > 0) continue;
+					// Skip AI messages with placeholder/empty content (from sanitizeMessages)
+					if (msgType === 'ai') {
+						const content = msg.content;
+						const hasSubstantialContent =
+							(typeof content === 'string' && content.trim().length > 0) ||
+							(Array.isArray(content) && content.length > 0);
+						if (!hasSubstantialContent) continue;
+					}
 					return i;
 				}
 				return -1;
@@ -484,7 +493,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 					if (!shouldInject) return msg;
 
 					const hasContent =
-						(typeof msg.content === 'string' && msg.content.length > 0) ||
+						(typeof msg.content === 'string' && msg.content.trim().length > 0) ||
 						(Array.isArray(msg.content) && msg.content.length > 0);
 					if (!hasContent) return msg;
 
