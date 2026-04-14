@@ -1,7 +1,7 @@
 {
   "name": "n8n-nodes-bedrock-advanced-p1",
-  "version": "0.5.4",
-  "description": "People1 fork of n8n-nodes-bedrock-advanced — cache metrics in output, coexists with original",
+  "version": "0.5.5",
+  "description": "People1 fork of n8n-nodes-bedrock-advanced — cache metrics in output, empty content fix, coexists with original",
   "keywords": [
     "n8n-community-node-package",
     "aws",
@@ -17,7 +17,10 @@
     "url": "https://github.com/franlealp1/n8n-nodes-bedrock-advanced-p1"
   },
   "main": "dist/index.js",
-  "scripts": {},
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
   "files": [
     "dist",
     "README.md",
@@ -29,5 +32,21 @@
       "dist/nodes/LmChatAwsBedrockAdvanced/LmChatAwsBedrockAdvanced.node.js",
       "dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js"
     ]
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.700.0",
+    "@langchain/aws": "^0.1.4",
+    "@langchain/core": "^0.3.40",
+    "@n8n/ai-utilities": ">=0.1.0",
+    "@smithy/node-http-handler": "^3.3.0",
+    "zod-to-json-schema": "^3.24.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": ">=1.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "n8n-workflow": "^1.72.0",
+    "typescript": "^5.7.0"
   }
 }
