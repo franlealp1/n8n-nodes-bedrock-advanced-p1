@@ -347,7 +347,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 		const client = new BedrockRuntimeClient(clientConfig);
 		const logger = this.logger;
 
-		class CachingChatBedrockConverse extends ChatBedrockConverse {
+		class PatchedChatBedrockConverse extends ChatBedrockConverse {
 
 			invocationParams(invokeOptions?: any): any {
 				const params = super.invocationParams(invokeOptions);
@@ -361,8 +361,29 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				return params;
 			}
 
+			// FIX: Bedrock Converse API rejects messages with empty content.
+			// This can happen with AI messages from chat history that had no text
+			// and whose tool_calls were not preserved during serialization.
+			private sanitizeMessages(messages: any[]): any[] {
+				return messages.map(msg => {
+					const msgType = msg._getType?.() ?? msg.getType?.();
+					if (msgType !== 'ai') return msg;
+					if (msg.tool_calls?.length > 0) return msg;
+					const hasContent =
+						(typeof msg.content === 'string' && msg.content.length > 0) ||
+						(Array.isArray(msg.content) && msg.content.length > 0);
+					if (hasContent) return msg;
+					const newMsg = Object.assign(Object.create(Object.getPrototypeOf(msg)), msg);
+					newMsg.content = ' ';
+					return newMsg;
+				});
+			}
+
 			async _generateNonStreaming(messages: any[], invokeOptions: any, runManager?: any) {
-				const modifiedMessages = this.injectCachePoints(messages);
+				const sanitized = this.sanitizeMessages(messages);
+				const modifiedMessages = options.enablePromptCaching
+					? this.injectCachePoints(sanitized)
+					: sanitized;
 				if (options.enableDebugLogs) {
 					logger.info('[BedrockAdvanced] modifiedMessages: ' + JSON.stringify(modifiedMessages));
 				}
@@ -411,7 +432,10 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			}
 
 			async *_streamResponseChunks(messages: any[], generateOptions: any, runManager?: any) {
-				const modifiedMessages = this.injectCachePoints(messages);
+				const sanitized = this.sanitizeMessages(messages);
+				const modifiedMessages = options.enablePromptCaching
+					? this.injectCachePoints(sanitized)
+					: sanitized;
 				if (options.enableDebugLogs) {
 					logger.info('[BedrockAdvanced] [stream] modifiedMessages: ' + JSON.stringify(modifiedMessages));
 				}
@@ -490,11 +514,9 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			}
 		}
 
-		const ModelClass = options.enablePromptCaching
-			? CachingChatBedrockConverse
-			: ChatBedrockConverse;
-
-		const model = new ModelClass({
+		// Always use our patched subclass — it handles both the empty content fix
+		// (always needed) and prompt caching (when enabled).
+		const model = new PatchedChatBedrockConverse({
 			client,
 			model: modelName,
 			region: credentials.region,
