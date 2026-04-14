@@ -374,7 +374,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 						(Array.isArray(msg.content) && msg.content.length > 0);
 					if (hasContent) return msg;
 					const newMsg = Object.assign(Object.create(Object.getPrototypeOf(msg)), msg);
-					newMsg.content = ' ';
+					newMsg.content = '.';
 					return newMsg;
 				});
 			}

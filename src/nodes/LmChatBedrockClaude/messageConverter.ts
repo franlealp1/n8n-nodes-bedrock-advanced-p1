@@ -168,7 +168,7 @@ export function convertMessagesToAnthropic(
 			// This can happen with AI messages from chat history that had no text
 			// and whose tool_calls were not preserved during serialization.
 			if (content.length === 0) {
-				content.push({ type: 'text', text: ' ' });
+				content.push({ type: 'text', text: '.' });
 			}
 			const anthropicMsg: AnthropicMessage = { role: 'assistant', content };
 			if (isTarget) addCacheControlToLastBlock(anthropicMsg, cacheControl!);
