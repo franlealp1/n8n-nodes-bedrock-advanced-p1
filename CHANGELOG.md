@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.1 (2026-04-20)
+
+### Fix: systemPromptBlocks silently dropped when Agent v2 has empty systemMessage
+
+In 0.6.0, `injectCachePoints` only REPLACED the content of an existing
+system message with the configured blocks. When the caller follows the
+caching contract (§3/§10) and leaves the LangChain Agent v2 `systemMessage`
+empty, Agent v2 does not emit a system message at all — so the messages
+array arrived at the Bedrock node with only the user turn. The replacement
+branch never matched, `systemPromptBlocks` were silently dropped, and the
+request reached Bedrock with no system prompt.
+
+Verified with smoke test execution 730218 on noprod: the model responded
+"I'm Claude, an AI assistant made by Anthropic. I don't recognize that
+session token or PING command." instead of honouring the configured
+protocol. `usage.inputTokens` was 25 instead of the expected ~2500 for the
+two blocks.
+
+The fix prepends a synthetic `SystemMessage({ content: '' })` before the
+map iteration runs when `systemPromptBlocks` is set and no system message
+already exists in the input. The existing multi-cachepoint branch then
+fills the content with the blocks + cache points. Guardrails:
+- Prepend only when `systemBlocks.length > 0`.
+- Prepend only when `cacheSystemPrompt` is not explicitly `false`.
+- Prepend only when no system message already exists.
+- `historyTargetIndex` is recomputed after the prepend so indices stay
+  coherent.
+
+35 tests pass (16 helper + 19 inject).
+
 ## 0.6.0 (2026-04-20)
 
 ### Feature: multi-cachepoint system prompt
