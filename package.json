@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bedrock-advanced-p1",
-  "version": "0.5.5",
+  "version": "0.6.1",
   "description": "People1 fork of n8n-nodes-bedrock-advanced — cache metrics in output, empty content fix, coexists with original",
   "keywords": [
     "n8n-community-node-package",
@@ -19,7 +19,9 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "node build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "files": [
     "dist",
@@ -47,6 +49,7 @@
   "devDependencies": {
     "esbuild": "^0.24.0",
     "n8n-workflow": "^1.72.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.4"
   }
 }

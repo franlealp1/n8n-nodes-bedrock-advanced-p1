@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.6.1 (2026-04-20)
+
+### Fix: systemPromptBlocks silently dropped when Agent v2 has empty systemMessage
+
+In 0.6.0, `injectCachePoints` only REPLACED the content of an existing
+system message with the configured blocks. When the caller follows the
+caching contract (§3/§10) and leaves the LangChain Agent v2 `systemMessage`
+empty, Agent v2 does not emit a system message at all — so the messages
+array arrived at the Bedrock node with only the user turn. The replacement
+branch never matched, `systemPromptBlocks` were silently dropped, and the
+request reached Bedrock with no system prompt.
+
+Verified with smoke test execution 730218 on noprod: the model responded
+"I'm Claude, an AI assistant made by Anthropic. I don't recognize that
+session token or PING command." instead of honouring the configured
+protocol. `usage.inputTokens` was 25 instead of the expected ~2500 for the
+two blocks.
+
+The fix prepends a synthetic `SystemMessage({ content: '' })` before the
+map iteration runs when `systemPromptBlocks` is set and no system message
+already exists in the input. The existing multi-cachepoint branch then
+fills the content with the blocks + cache points. Guardrails:
+- Prepend only when `systemBlocks.length > 0`.
+- Prepend only when `cacheSystemPrompt` is not explicitly `false`.
+- Prepend only when no system message already exists.
+- `historyTargetIndex` is recomputed after the prepend so indices stay
+  coherent.
+
+35 tests pass (16 helper + 19 inject).
+
+## 0.6.0 (2026-04-20)
+
+### Feature: multi-cachepoint system prompt
+
+Adds a new option `systemPromptBlocks` to the **AWS Bedrock Chat Model
+(Advanced P1)** node. When set to a non-empty array of strings (or a
+JSON string that parses to one), the node REPLACES the AI Agent system
+message content with `[{text:b1},{cachePoint},{text:b2},{cachePoint},...]`,
+unlocking up to 4 cachepoints per request (the Bedrock Converse hard
+limit).
+
+**Why:** the single-cachepoint approach is limited by the most volatile
+byte in the system message — one mutation invalidates the full prefix.
+Measured techo in Miguel's Onboarding A/B: ~56% hit rate. Multi-
+cachepoint lifts that by localising invalidations to one block and
+letting infrequently-changing content (rules, identity, static
+instructions) stay cached across requests that only mutate the
+per-session block (user context, role data, state).
+
+**Semantics:**
+
+- Each block should be ≥ ~1024 tokens (~4000 chars) to reach Bedrock's
+  minimum cacheable size; shorter blocks produce a warn log but do not
+  fail.
+- Max 4 cachepoints per request; if more blocks are provided, the first
+  3 are preserved and the rest are merged into the 4th with `\n\n` +
+  error log.
+- Ignored if `cacheSystemPrompt: false` or `enablePromptCaching: false`.
+- Legacy single-cachepoint behaviour is preserved when the option is
+  unset / empty.
+
+Contract reference: `docDevsPeople1/planesClaude/CACHING_REFACTOR_CONTRACT.md` §5.
+
+### Also shipped in this release
+
+- **Plan #41 fix**: `additional_kwargs.model` is now set on AI messages
+  so the Metrics Analyzer workflow can detect the model name from
+  `intermediateSteps`. Already in `src/` since commit `6cbd832`, now in
+  the npm bundle.
+- **Dev setup**: `vitest` added as devDep; 31 unit tests cover
+  `parseSystemPromptBlocks` (16) and `injectCachePoints` (15).
+- **Refactor**: `injectCachePoints` and `findHistoryCacheTarget`
+  extracted from `PatchedChatBedrockConverse` into a pure module
+  (`src/nodes/LmChatAwsBedrockAdvanced/injectCachePoints.ts`). No
+  behaviour change.
+
 ## 0.5.5 (2026-04-14)
 
 ### Rebuilt from source with proper build system
