@@ -46,6 +46,55 @@ Patches applied to both nodes:
 
 When cache is disabled or not applicable, `cacheReadInputTokens` and `cacheWriteInputTokens` are `0`.
 
+## Multi-cachepoint system prompt (v0.6.0+)
+
+The **AWS Bedrock Chat Model (Advanced P1)** node exposes an option
+`systemPromptBlocks` that lets the system prompt be split into multiple
+blocks with a `cachePoint` marker between each pair.
+
+The Bedrock Converse API supports up to 4 cachepoints per request. With
+this option you can keep the fixed part of the prompt (rules, identity,
+protocols) cached across requests while only the variable part (user
+context, role data, session state) pays the cache-write cost when it
+changes.
+
+### Usage
+
+1. Produce the blocks upstream in a Code node (sibling of the AI Agent):
+
+   ```js
+   return [{
+     json: {
+       systemBlocks: [
+         "REGLA #1...\nIdentidad...\nProtocolos...",   // fixed block
+         "Rol del usuario X...\nTools disponibles...", // variable block
+       ],
+     },
+   }];
+   ```
+
+2. Wire the array to the Bedrock node option (expression):
+
+   ```
+   {{ $('Generate Prompt Blocks').item.json.systemBlocks }}
+   ```
+
+3. Leave the AI Agent `systemMessage` empty. When `systemPromptBlocks`
+   is set, it REPLACES the system message content. The node emits a
+   warn log if the Agent's system message has content.
+
+### Rules
+
+- Each block should be ≥ ~1024 tokens (~4000 chars) to reach Bedrock's
+  minimum cacheable size; shorter blocks produce a warn log but do not
+  fail (Bedrock just ignores the cachepoint).
+- Max 4 cachepoints per request; blocks beyond the 4th are merged into
+  the 4th with a `\n\n` separator + error log.
+- Ignored if `cacheSystemPrompt: false` or `enablePromptCaching: false`.
+- Accepts either an array literal or a JSON string that parses to one.
+
+Full contract: `docDevsPeople1/planesClaude/CACHING_REFACTOR_CONTRACT.md` §5.
+
 ## Installation
 
 ### On the N8N server (admin only)
