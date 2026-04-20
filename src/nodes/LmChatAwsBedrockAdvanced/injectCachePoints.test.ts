@@ -248,4 +248,69 @@ describe('injectCachePoints', () => {
 			expect(msgs[0].content).toBe('x'); // original unchanged
 		});
 	});
+
+	describe('synthetic system message prepend (Agent v2 with empty systemMessage)', () => {
+		it('prepends a synthetic system message filled with the blocks when input has none', () => {
+			const { logger, warn } = makeLogger();
+			const msgs = [userMsg('hi')];
+			const out = injectCachePoints(
+				msgs,
+				{ systemPromptBlocks: [B1, B2] },
+				logger,
+			);
+
+			expect(out).toHaveLength(2);
+
+			const firstType = out[0]._getType?.() ?? out[0].getType?.();
+			expect(firstType).toBe('system');
+			expect(out[0].content).toEqual([
+				{ type: 'text', text: B1 },
+				CACHEPOINT,
+				{ type: 'text', text: B2 },
+				CACHEPOINT,
+			]);
+
+			expect(out[1]).toBe(msgs[0]);
+
+			// prepended system was empty, so no "replacing" warn
+			expect(warn.filter((m) => m.includes('replacing'))).toEqual([]);
+		});
+
+		it('does NOT prepend when systemBlocks is empty (legacy path)', () => {
+			const { logger } = makeLogger();
+			const msgs = [userMsg('hi')];
+			const out = injectCachePoints(msgs, {}, logger);
+
+			expect(out).toHaveLength(1);
+			expect(out[0]).toBe(msgs[0]);
+		});
+
+		it('does NOT prepend when cacheSystemPrompt is false even with systemBlocks set', () => {
+			const { logger } = makeLogger();
+			const msgs = [userMsg('hi')];
+			const out = injectCachePoints(
+				msgs,
+				{ cacheSystemPrompt: false, systemPromptBlocks: [B1, B2] },
+				logger,
+			);
+
+			expect(out).toHaveLength(1);
+			expect(out[0]).toBe(msgs[0]);
+		});
+
+		it('does NOT prepend when an existing system message is already present', () => {
+			const { logger } = makeLogger();
+			const msgs = [systemMsg('existing'), userMsg('hi')];
+			const out = injectCachePoints(
+				msgs,
+				{ systemPromptBlocks: [B1, B2] },
+				logger,
+			);
+
+			// 2 in, 2 out — no prepend
+			expect(out).toHaveLength(2);
+			// First was replaced with blocks (via the map branch, not prepend)
+			expect((out[0].content as any[]).filter((b) => b.cachePoint)).toHaveLength(2);
+		});
+	});
 });

@@ -9,6 +9,8 @@
  * §2 (mechanics) and §5 (multi-cachepoint).
  */
 
+import { SystemMessage } from '@langchain/core/messages';
+
 import {
 	parseSystemPromptBlocks,
 	type ParseLogger,
@@ -59,16 +61,32 @@ export function injectCachePoints(
 ): any[] {
 	const cachePointBlock = { cachePoint: { type: 'default' } };
 	const shouldCacheSystem = options.cacheSystemPrompt !== false;
-	const historyTargetIndex = options.cacheConversationHistory
-		? findHistoryCacheTarget(messages)
-		: -1;
 
 	const systemBlocks = shouldCacheSystem
 		? parseSystemPromptBlocks(options.systemPromptBlocks, logger)
 		: [];
+
+	// When `systemPromptBlocks` is set but the incoming messages don't contain
+	// a system message (the typical shape produced by LangChain Agent v2 with
+	// empty `systemMessage` — recommended by the caching contract §3/§10),
+	// prepend a synthetic empty SystemMessage. The map branch below will fill
+	// its content with the blocks + cache points.
+	let workMessages = messages;
+	if (systemBlocks.length > 0) {
+		const hasSystemMsg = workMessages.some(
+			(m) => (m._getType?.() ?? m.getType?.()) === 'system',
+		);
+		if (!hasSystemMsg) {
+			workMessages = [new SystemMessage({ content: '' }), ...workMessages];
+		}
+	}
+
+	const historyTargetIndex = options.cacheConversationHistory
+		? findHistoryCacheTarget(workMessages)
+		: -1;
 	let systemBlocksApplied = false;
 
-	return messages.map((msg, index) => {
+	return workMessages.map((msg, index) => {
 		const msgType = msg._getType?.() ?? msg.getType?.();
 
 		const isSystemToCache = msgType === 'system' && shouldCacheSystem;
