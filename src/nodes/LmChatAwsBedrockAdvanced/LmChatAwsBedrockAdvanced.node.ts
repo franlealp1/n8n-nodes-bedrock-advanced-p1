@@ -23,6 +23,8 @@ import {
 	type SupplyData,
 } from 'n8n-workflow';
 
+import { parseSystemPromptBlocks } from './parseSystemPromptBlocks';
+
 
 class LmChatAwsBedrockAdvancedP1 implements INodeType {
 	description: INodeTypeDescription = {
@@ -535,13 +537,46 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 					? this.findHistoryCacheTarget(messages)
 					: -1;
 
+				const systemBlocks = shouldCacheSystem
+					? parseSystemPromptBlocks(options.systemPromptBlocks, logger)
+					: [];
+				let systemBlocksApplied = false;
+
 				return messages.map((msg, index) => {
 					const msgType = msg._getType?.() ?? msg.getType?.();
 
-					const shouldInject =
-						(msgType === 'system' && shouldCacheSystem) ||
-						(index === historyTargetIndex);
+					const isSystemToCache = msgType === 'system' && shouldCacheSystem;
+					const isHistoryTarget = index === historyTargetIndex;
 
+					// Multi-cachepoint path: REPLACES content of the first system message.
+					if (isSystemToCache && systemBlocks.length > 0 && !systemBlocksApplied) {
+						systemBlocksApplied = true;
+						const originalIsEmpty =
+							!msg.content ||
+							(typeof msg.content === 'string' && msg.content.trim().length === 0) ||
+							(Array.isArray(msg.content) && msg.content.length === 0);
+						if (!originalIsEmpty) {
+							logger.warn(
+								'[BedrockAdvanced] systemPromptBlocks is set; replacing the existing system message content.',
+							);
+						}
+						const newContent: any[] = [];
+						for (const block of systemBlocks) {
+							newContent.push({ type: 'text', text: block });
+							newContent.push({ cachePoint: { type: 'default' } });
+						}
+						if (options.enableDebugLogs) {
+							logger.info(
+								`[BedrockAdvanced] systemPromptBlocks: ${systemBlocks.length} blocks, ${systemBlocks.length} cachepoints.`,
+							);
+						}
+						const newMsg = Object.assign(Object.create(Object.getPrototypeOf(msg)), msg);
+						newMsg.content = newContent;
+						return newMsg;
+					}
+
+					// Legacy path: single cachepoint at the end of content.
+					const shouldInject = isSystemToCache || isHistoryTarget;
 					if (!shouldInject) return msg;
 
 					const hasContent =
