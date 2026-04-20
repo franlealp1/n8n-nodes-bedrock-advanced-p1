@@ -295,6 +295,20 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 						},
 					},
 					{
+						displayName: 'System Prompt Blocks (Multi-Cachepoint)',
+						name: 'systemPromptBlocks',
+						type: 'json',
+						default: '',
+						description:
+							'Split the system prompt into multiple blocks with cache points between them. Expected: array of non-empty strings (or a JSON string that parses to one). When present and non-empty, REPLACES the AI Agent system message content. Each block should be ≥ ~1024 tokens to reach Bedrock\'s minimum cacheable size. Max 4 cache points per request (Bedrock hard limit); blocks beyond the 4th are merged into the 4th. Leave empty for legacy single-cachepoint behavior. Ignored if Cache System Prompt is disabled.',
+						placeholder: '={{ $(\'Generate Prompt Blocks\').item.json.systemBlocks }}',
+						displayOptions: {
+							show: {
+								enablePromptCaching: [true],
+							},
+						},
+					},
+					{
 						displayName: 'Enable Debug Logs',
 						name: 'enableDebugLogs',
 						default: false,
@@ -324,6 +338,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			cacheTools?: boolean;
 			cacheConversationHistory?: boolean;
 			cacheTtl?: string;
+			systemPromptBlocks?: string | string[];
 			enableDebugLogs?: boolean;
 		};
 
