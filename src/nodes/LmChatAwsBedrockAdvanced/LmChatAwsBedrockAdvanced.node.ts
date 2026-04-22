@@ -61,6 +61,12 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			{
 				name: 'aws',
 				required: true,
+				displayOptions: { show: { authType: ['iam'] } },
+			},
+			{
+				name: 'awsBedrockApiKeyP1',
+				required: true,
+				displayOptions: { show: { authType: ['apiKey'] } },
 			},
 		],
 		requestDefaults: {
@@ -68,6 +74,25 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			baseURL: '=https://bedrock.{{$credentials?.region ?? "eu-central-1"}}.amazonaws.com',
 		},
 		properties: [
+			{
+				displayName: 'Authentication',
+				name: 'authType',
+				type: 'options',
+				options: [
+					{
+						name: 'AWS IAM (existing)',
+						value: 'iam',
+						description: 'Access Key ID + Secret Access Key — existing configuration',
+					},
+					{
+						name: 'Bedrock API Key',
+						value: 'apiKey',
+						description: 'Bearer token — simpler, Bedrock-only scope',
+					},
+				],
+				default: 'iam',
+				description: 'Authentication method for AWS Bedrock',
+			},
 			{
 				displayName: 'Model Source',
 				name: 'modelSource',
@@ -324,12 +349,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 	};
 
 	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
-		const credentials = await this.getCredentials<{
-			region: string;
-			secretAccessKey: string;
-			accessKeyId: string;
-			sessionToken: string;
-		}>('aws');
+		const authType = this.getNodeParameter('authType', itemIndex, 'iam') as string;
 		const modelName = this.getNodeParameter('model', itemIndex) as string;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
@@ -345,23 +365,84 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 		};
 
 		const proxyAgent = getNodeProxyAgent();
-		const clientConfig: BedrockRuntimeClientConfig = {
-			region: credentials.region,
-			credentials: {
-				secretAccessKey: credentials.secretAccessKey,
-				accessKeyId: credentials.accessKeyId,
-				...(credentials.sessionToken && { sessionToken: credentials.sessionToken }),
-			},
-		};
+		let client: BedrockRuntimeClient;
+		let region: string;
 
-		if (proxyAgent) {
-			clientConfig.requestHandler = new NodeHttpHandler({
-				httpAgent: proxyAgent,
-				httpsAgent: proxyAgent,
-			});
+		if (authType === 'apiKey') {
+			// ── Bearer token path ────────────────────────────────────────────────
+			const apiKeyCreds = await this.getCredentials<{
+				apiKey: string;
+				region: string;
+			}>('awsBedrockApiKeyP1');
+
+			region = apiKeyCreds.region;
+
+			const clientConfig: BedrockRuntimeClientConfig = {
+				region,
+				// Dummy IAM credentials — SDK requires them to initialize.
+				// bedrockBearerTokenMiddleware replaces the auth header after SigV4.
+				credentials: {
+					accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+					secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+				},
+			};
+
+			if (proxyAgent) {
+				clientConfig.requestHandler = new NodeHttpHandler({
+					httpAgent: proxyAgent,
+					httpsAgent: proxyAgent,
+				});
+			}
+
+			const bearerToken = apiKeyCreds.apiKey;
+			client = new BedrockRuntimeClient(clientConfig);
+
+			// Runs at 'finalizeRequest' with priority 'low' → AFTER httpSigningMiddleware.
+			// Replaces the SigV4 Authorization header with Bearer token.
+			client.middlewareStack.add(
+				(next: any) => async (args: any) => {
+					const req = args.request as any;
+					req.headers['authorization'] = `Bearer ${bearerToken}`;
+					// x-amz-security-token is for temporary session credentials only — not needed.
+					delete req.headers['x-amz-security-token'];
+					return next(args);
+				},
+				{
+					step: 'finalizeRequest',
+					priority: 'low',
+					name: 'bedrockBearerTokenMiddleware',
+				},
+			);
+		} else {
+			// ── IAM path (existing behavior, zero changes) ───────────────────────
+			const credentials = await this.getCredentials<{
+				region: string;
+				secretAccessKey: string;
+				accessKeyId: string;
+				sessionToken: string;
+			}>('aws');
+
+			region = credentials.region;
+
+			const clientConfig: BedrockRuntimeClientConfig = {
+				region,
+				credentials: {
+					secretAccessKey: credentials.secretAccessKey,
+					accessKeyId: credentials.accessKeyId,
+					...(credentials.sessionToken && { sessionToken: credentials.sessionToken }),
+				},
+			};
+
+			if (proxyAgent) {
+				clientConfig.requestHandler = new NodeHttpHandler({
+					httpAgent: proxyAgent,
+					httpsAgent: proxyAgent,
+				});
+			}
+
+			client = new BedrockRuntimeClient(clientConfig);
 		}
 
-		const client = new BedrockRuntimeClient(clientConfig);
 		const logger = this.logger;
 
 		class PatchedChatBedrockConverse extends ChatBedrockConverse {
@@ -528,7 +609,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 		const model = new PatchedChatBedrockConverse({
 			client,
 			model: modelName,
-			region: credentials.region,
+			region,
 			temperature: options.temperature,
 			maxTokens: options.maxTokensToSample,
 			// P1 patch: custom tokensUsageParser to preserve cache metrics

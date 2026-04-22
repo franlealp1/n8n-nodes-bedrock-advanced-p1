@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.0 (2026-04-22)
+
+### Feature: Bedrock API Key authentication (`awsBedrockApiKeyP1`)
+
+Adds a second authentication method alongside the existing AWS IAM credentials.
+Nodes can now authenticate with a Bedrock API key (Bearer token) in addition to
+AWS IAM (SigV4). Existing nodes default to `authType: iam` and are fully backward
+compatible — no workflow changes required.
+
+**New credential type**: `AWS Bedrock API Key (P1)` — Bedrock API key + region.
+Includes a built-in connection test via `GET /foundation-models` with Bearer auth.
+
+**Technical approach**: The `BedrockRuntimeClient` is initialized with dummy IAM
+credentials (required by the SDK) and a `finalizeRequest` low-priority middleware
+replaces the `Authorization` header with `Bearer <apiKey>` after SigV4 signing.
+
+**New node parameter**: `Authentication` (options: `AWS IAM (existing)` / `Bedrock API Key`).
+Default is `iam` so all pre-existing nodes continue without any visible change.
+
+---
+
 ## 0.6.1 (2026-04-20)
 
 ### Fix: systemPromptBlocks silently dropped when Agent v2 has empty systemMessage
