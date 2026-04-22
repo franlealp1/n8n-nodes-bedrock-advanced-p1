@@ -17,6 +17,8 @@ import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 import {
 	NodeConnectionTypes,
+	type ILoadOptionsFunctions,
+	type INodePropertyOptions,
 	type INodeType,
 	type INodeTypeDescription,
 	type ISupplyDataFunctions,
@@ -116,19 +118,23 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 					show: { authType: ['iam'] },
 				},
 			},
-			// ── API key auth: plain text model ID (no loadOptions — Bearer auth is not
-			// supported by N8N's loadOptions routing mechanism)
+			// ── API key auth: dropdown via loadOptionsMethod (routing does not inject
+			// Bearer token; programmatic method fetches the list with explicit auth)
 			{
 				displayName: 'Model',
 				name: 'model',
-				type: 'string',
-				default: '',
-				placeholder: 'anthropic.claude-3-5-haiku-20241022-v1:0',
+				type: 'options',
+				allowArbitraryValues: true,
 				description:
-					'Bedrock model ID. <a href="https://docs.aws.amazon.com/bedrock/latest/userguide/model-ids.html">Find model IDs</a>.',
+					'The model which will generate the completion. <a href="https://docs.aws.amazon.com/bedrock/latest/userguide/foundation-models.html">Learn more</a>.',
 				displayOptions: {
 					show: { authType: ['apiKey'] },
 				},
+				typeOptions: {
+					loadOptionsDependsOn: ['authType'],
+					loadOptionsMethod: 'getModelsForApiKey',
+				},
+				default: '',
 			},
 			// ── IAM auth: on-demand dropdown with loadOptions
 			{
@@ -367,6 +373,28 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				],
 			},
 		],
+	};
+
+	methods = {
+		loadOptions: {
+			async getModelsForApiKey(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				const creds = await this.getCredentials<{ apiKey: string; region: string }>(
+					'awsBedrockApiKeyP1',
+				);
+				const response = await this.helpers.httpRequest({
+					method: 'GET',
+					url: `https://bedrock.${creds.region}.amazonaws.com/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND`,
+					headers: { Authorization: `Bearer ${creds.apiKey}` },
+				});
+				return ((response as any).modelSummaries as any[])
+					.map(m => ({
+						name: m.modelName as string,
+						value: m.modelId as string,
+						description: m.modelArn as string,
+					}))
+					.sort((a, b) => a.name.localeCompare(b.name));
+			},
+		},
 	};
 
 	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
