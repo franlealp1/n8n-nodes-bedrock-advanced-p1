@@ -55,7 +55,11 @@ var AwsBedrockApiKeyP1 = class {
     ];
     this.authenticate = {
       type: "generic",
-      properties: {}
+      properties: {
+        headers: {
+          Authorization: "=Bearer {{$credentials.apiKey}}"
+        }
+      }
     };
     this.test = {
       request: {

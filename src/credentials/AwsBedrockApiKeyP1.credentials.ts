@@ -32,7 +32,11 @@ export class AwsBedrockApiKeyP1 implements ICredentialType {
 
 	authenticate = {
 		type: 'generic' as const,
-		properties: {},
+		properties: {
+			headers: {
+				Authorization: '=Bearer {{$credentials.apiKey}}',
+			},
+		},
 	};
 
 	test: ICredentialType['test'] = {
