@@ -26,7 +26,7 @@ const commonOptions = {
 };
 
 async function build() {
-	// 1. Bundle each node independently (each gets its own file)
+	// 1. Bundle each node and credential independently
 	await Promise.all([
 		esbuild.build({
 			...commonOptions,
@@ -37,6 +37,11 @@ async function build() {
 			...commonOptions,
 			entryPoints: ['src/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.ts'],
 			outfile: 'dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js',
+		}),
+		esbuild.build({
+			...commonOptions,
+			entryPoints: ['src/credentials/AwsBedrockApiKeyP1.credentials.ts'],
+			outfile: 'dist/credentials/AwsBedrockApiKeyP1.credentials.js',
 		}),
 	]);
 
