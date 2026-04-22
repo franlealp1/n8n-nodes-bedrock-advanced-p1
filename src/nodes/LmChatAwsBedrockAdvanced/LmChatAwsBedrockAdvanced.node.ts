@@ -112,7 +112,25 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				],
 				default: 'onDemand',
 				description: 'Choose between on-demand foundation models or inference profiles',
+				displayOptions: {
+					show: { authType: ['iam'] },
+				},
 			},
+			// ── API key auth: plain text model ID (no loadOptions — Bearer auth is not
+			// supported by N8N's loadOptions routing mechanism)
+			{
+				displayName: 'Model',
+				name: 'model',
+				type: 'string',
+				default: '',
+				placeholder: 'anthropic.claude-3-5-haiku-20241022-v1:0',
+				description:
+					'Bedrock model ID. <a href="https://docs.aws.amazon.com/bedrock/latest/userguide/model-ids.html">Find model IDs</a>.',
+				displayOptions: {
+					show: { authType: ['apiKey'] },
+				},
+			},
+			// ── IAM auth: on-demand dropdown with loadOptions
 			{
 				displayName: 'Model',
 				name: 'model',
@@ -121,6 +139,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				description:
 					'The model which will generate the completion. <a href="https://docs.aws.amazon.com/bedrock/latest/userguide/foundation-models.html">Learn more</a>.',
 				displayOptions: {
+					show: { authType: ['iam'] },
 					hide: {
 						modelSource: ['inferenceProfile'],
 					},
@@ -168,6 +187,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				},
 				default: '',
 			},
+			// ── IAM auth: inference profile dropdown with loadOptions
 			{
 				displayName: 'Model',
 				name: 'model',
@@ -177,6 +197,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 					'The inference profile which will generate the completion. <a href="https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html">Learn more</a>.',
 				displayOptions: {
 					show: {
+						authType: ['iam'],
 						modelSource: ['inferenceProfile'],
 					},
 				},
