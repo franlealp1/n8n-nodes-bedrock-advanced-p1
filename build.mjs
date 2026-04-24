@@ -48,6 +48,11 @@ async function build() {
 			entryPoints: ['src/nodes/LmChatBedrockClaudeStreaming/LmChatBedrockClaudeStreaming.node.ts'],
 			outfile: 'dist/nodes/LmChatBedrockClaudeStreaming/LmChatBedrockClaudeStreaming.node.js',
 		}),
+		esbuild.build({
+			...commonOptions,
+			entryPoints: ['src/nodes/LmChatAwsBedrockAdvancedStreaming/LmChatAwsBedrockAdvancedStreaming.node.ts'],
+			outfile: 'dist/nodes/LmChatAwsBedrockAdvancedStreaming/LmChatAwsBedrockAdvancedStreaming.node.js',
+		}),
 	]);
 
 	// 2. Build the index that re-exports both nodes
@@ -75,6 +80,14 @@ async function build() {
 		cpSync(
 			'dist/nodes/LmChatBedrockClaude/bedrock-claude.svg',
 			'dist/nodes/LmChatBedrockClaudeStreaming/bedrock-claude.svg',
+		);
+	} catch { /* icon may not exist, keep existing */ }
+	// AdvancedStreaming shares the Advanced node's SVG (no per-node icon).
+	// SVG lives under dist/ (git-tracked) rather than src/ — source from there.
+	try {
+		cpSync(
+			'dist/nodes/LmChatAwsBedrockAdvanced/bedrock.svg',
+			'dist/nodes/LmChatAwsBedrockAdvancedStreaming/bedrock.svg',
 		);
 	} catch { /* icon may not exist, keep existing */ }
 

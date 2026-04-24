@@ -33,7 +33,8 @@
     "nodes": [
       "dist/nodes/LmChatAwsBedrockAdvanced/LmChatAwsBedrockAdvanced.node.js",
       "dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js",
-      "dist/nodes/LmChatBedrockClaudeStreaming/LmChatBedrockClaudeStreaming.node.js"
+      "dist/nodes/LmChatBedrockClaudeStreaming/LmChatBedrockClaudeStreaming.node.js",
+      "dist/nodes/LmChatAwsBedrockAdvancedStreaming/LmChatAwsBedrockAdvancedStreaming.node.js"
     ],
     "credentials": [
       "dist/credentials/AwsBedrockApiKeyP1.credentials.js"
