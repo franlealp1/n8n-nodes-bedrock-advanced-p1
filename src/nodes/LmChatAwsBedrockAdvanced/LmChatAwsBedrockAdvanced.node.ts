@@ -25,6 +25,7 @@ import {
 } from 'n8n-workflow';
 
 import { PatchedChatBedrockConverse } from './PatchedChatBedrockConverse';
+import { ChatAwsBedrockAdvancedStreaming } from '../LmChatAwsBedrockAdvancedStreaming/ChatAwsBedrockAdvancedStreaming';
 
 
 class LmChatAwsBedrockAdvancedP1 implements INodeType {
@@ -385,6 +386,53 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 					},
 				],
 			},
+			{
+				displayName: 'Streaming',
+				name: 'streaming',
+				type: 'collection',
+				placeholder: 'Add streaming option',
+				default: {},
+				description:
+					'Optional: emit fire-and-forget HTTP POSTs with text deltas during generation. Leave Callback URL empty for standard non-streaming behavior (identical to pre-0.9.0 Advanced node).',
+				options: [
+					{
+						displayName: 'Callback URL',
+						name: 'callbackUrl',
+						type: 'string',
+						default: '',
+						description: 'HTTP endpoint to POST {streamId, seq, delta, done} during generation. Empty = no streaming (uses non-streaming Converse API; byte-identical to pre-0.9.0 behavior).',
+					},
+					{
+						displayName: 'Session ID',
+						name: 'sessionId',
+						type: 'string',
+						default: '',
+						description: 'streamId sent in each POST (recommended: set to {{ $json.chatId }} from the workflow trigger).',
+					},
+					{
+						displayName: 'Auth Header Value',
+						name: 'authHeaderValue',
+						type: 'string',
+						typeOptions: { password: true },
+						default: '',
+						description: 'Value for x-webhook-auth header (Flock validateN8NWebhook).',
+					},
+					{
+						displayName: 'Batch Interval (Ms)',
+						name: 'batchIntervalMs',
+						type: 'number',
+						default: 60,
+						description: 'Timer batching window before flushing buffered deltas.',
+					},
+					{
+						displayName: 'Max Batch Chars',
+						name: 'maxBatchChars',
+						type: 'number',
+						default: 120,
+						description: 'Char threshold that triggers an immediate flush (bypasses timer).',
+					},
+				],
+			},
 		],
 	};
 
@@ -441,6 +489,14 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			cacheTtl?: string;
 			systemPromptBlocks?: string | string[];
 			enableDebugLogs?: boolean;
+		};
+
+		const streaming = this.getNodeParameter('streaming', itemIndex, {}) as {
+			callbackUrl?: string;
+			sessionId?: string;
+			authHeaderValue?: string;
+			batchIntervalMs?: number;
+			maxBatchChars?: number;
 		};
 
 		const proxyAgent = getNodeProxyAgent();
@@ -522,9 +578,12 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			client = new BedrockRuntimeClient(clientConfig);
 		}
 
-		// Always use our patched subclass — it handles both the empty content fix
-		// (always needed) and prompt caching (when enabled).
-		const model = new PatchedChatBedrockConverse({
+		// Build model: streaming subclass when Callback URL is set, plain Patched otherwise.
+		// Callback URL empty → streaming=false (default) → non-streaming Converse API,
+		//                      byte-identical to pre-0.9.0 Advanced behavior.
+		// Callback URL set   → streaming=true (forced in subclass) → streaming Converse API
+		//                      with side-channel POSTs to the callback during generation.
+		const baseArgs = {
 			client,
 			model: modelName,
 			region,
@@ -546,7 +605,18 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				},
 			}) as any],
 			onFailedAttempt: makeN8nLlmFailedAttemptHandler(this),
-		});
+		};
+
+		const model = streaming.callbackUrl
+			? new ChatAwsBedrockAdvancedStreaming({
+				...baseArgs,
+				streamCallbackUrl:      streaming.callbackUrl,
+				streamSessionId:        streaming.sessionId,
+				streamAuthHeaderValue:  streaming.authHeaderValue,
+				streamBatchIntervalMs:  streaming.batchIntervalMs ?? 60,
+				streamMaxBatchChars:    streaming.maxBatchChars   ?? 120,
+			})
+			: new PatchedChatBedrockConverse(baseArgs);
 
 		return {
 			response: model,

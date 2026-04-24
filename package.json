@@ -32,8 +32,7 @@
     "n8nNodesApiVersion": 1,
     "nodes": [
       "dist/nodes/LmChatAwsBedrockAdvanced/LmChatAwsBedrockAdvanced.node.js",
-      "dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js",
-      "dist/nodes/LmChatAwsBedrockAdvancedStreaming/LmChatAwsBedrockAdvancedStreaming.node.js"
+      "dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js"
     ],
     "credentials": [
       "dist/credentials/AwsBedrockApiKeyP1.credentials.js"
