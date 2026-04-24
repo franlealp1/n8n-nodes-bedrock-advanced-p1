@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.0-alpha.1 (2026-04-24)
+
+### Refactor: extract PatchedChatBedrockConverse to own file
+
+The inline ChatBedrockConverse subclass that lived inside
+LmChatAwsBedrockAdvanced.node.ts supplyData() (158 lines) is now in its own
+file `src/nodes/LmChatAwsBedrockAdvanced/PatchedChatBedrockConverse.ts` with
+an explicit `patchOptions` + `patchLogger` constructor contract. The Advanced
+node keeps its public behavior byte-identical (15 byte-identity tests cover
+all 6 overrides: invocationParams, sanitizeMessages, _generateNonStreaming,
+_generate, _streamResponseChunks, formatCacheMetrics).
+
+### Feat: AWS Bedrock Chat Model Streaming (P1) sibling node
+
+New `lmChatAwsBedrockAdvancedStreamingP1` node extends
+PatchedChatBedrockConverse with an override of _streamResponseChunks that
+side-channels text deltas to an HTTP callback during generation
+(fire-and-forget POST with batching by timer + char threshold). Uses the
+existing Advanced auth router (apiKey or IAM), cache stack (systemPromptBlocks,
+cacheSystemPrompt, cacheTools, cacheConversationHistory), and tokensUsageParser
+unchanged. New collection "Streaming" with 5 fields (Callback URL, Session ID,
+Auth Header Value, Batch Interval Ms, Max Batch Chars) — empty URL = no-op
+byte-identical to the Advanced parent.
+
+### Fix: remove LmChatBedrockClaudeStreaming wrong-parent (PRP-1 correction)
+
+PRP-1 (merged in 0.8.0-alpha.1) built the streaming node on ChatBedrockClaude,
+which does not support authType=apiKey nor granular caching — it was inert
+for every production workflow. The wrong-parent folder and its artifacts
+are removed; replaced by AWS Bedrock Chat Model Streaming (P1) over the
+Advanced family.
+
+---
+
 ## 0.7.4 (2026-04-22)
 
 ### Fix: model dropdown for Bedrock API key auth (loadOptionsMethod)
