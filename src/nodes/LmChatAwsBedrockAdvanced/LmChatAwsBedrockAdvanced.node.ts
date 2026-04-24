@@ -7,7 +7,6 @@
 
 import type { BedrockRuntimeClientConfig } from '@aws-sdk/client-bedrock-runtime';
 import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
-import { ChatBedrockConverse } from '@langchain/aws';
 import {
 	getNodeProxyAgent,
 	makeN8nLlmFailedAttemptHandler,
@@ -25,7 +24,7 @@ import {
 	type SupplyData,
 } from 'n8n-workflow';
 
-import { injectCachePoints } from './injectCachePoints';
+import { PatchedChatBedrockConverse } from './PatchedChatBedrockConverse';
 
 
 class LmChatAwsBedrockAdvancedP1 implements INodeType {
@@ -523,167 +522,6 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			client = new BedrockRuntimeClient(clientConfig);
 		}
 
-		const logger = this.logger;
-
-		class PatchedChatBedrockConverse extends ChatBedrockConverse {
-
-			invocationParams(invokeOptions?: any): any {
-				const params = super.invocationParams(invokeOptions);
-				if (options.cacheTools && params.toolConfig?.tools?.length) {
-					const ttl = options.cacheTtl === '1h' ? '1h' : '5m';
-					params.toolConfig = {
-						...params.toolConfig,
-						tools: [...params.toolConfig.tools, { cachePoint: { type: 'default', ttl } }],
-					};
-				}
-				return params;
-			}
-
-			// FIX: Bedrock Converse API rejects messages with empty content.
-			// This can happen with AI messages from chat history that had no text
-			// and whose tool_calls were not preserved during serialization.
-			private sanitizeMessages(messages: any[]): any[] {
-				return messages.map(msg => {
-					const msgType = msg._getType?.() ?? msg.getType?.();
-					if (msgType !== 'ai') return msg;
-					if (msg.tool_calls?.length > 0) return msg;
-					const hasContent =
-						(typeof msg.content === 'string' && msg.content.length > 0) ||
-						(Array.isArray(msg.content) && msg.content.length > 0);
-					if (hasContent) return msg;
-					const newMsg = Object.assign(Object.create(Object.getPrototypeOf(msg)), msg);
-					newMsg.content = '.';
-					return newMsg;
-				});
-			}
-
-			async _generateNonStreaming(messages: any[], invokeOptions: any, runManager?: any) {
-				const sanitized = this.sanitizeMessages(messages);
-				const modifiedMessages = options.enablePromptCaching
-					? injectCachePoints(sanitized, options, logger)
-					: sanitized;
-				if (options.enableDebugLogs) {
-					logger.info('[BedrockAdvanced] modifiedMessages: ' + JSON.stringify(modifiedMessages));
-				}
-				return super._generateNonStreaming(modifiedMessages, invokeOptions, runManager);
-			}
-
-			// P1 patch: cache metrics in tokenUsage for N8nLlmTracing visibility
-			// + populate response_metadata & usage_metadata so intermediateSteps carries token data
-			async _generate(messages: any[], generateOptions: any, runManager?: any) {
-				const response = await super._generate(messages, generateOptions, runManager);
-
-				if (options.enableDebugLogs) {
-					logger.info('[BedrockAdvanced] response: ' + JSON.stringify(response));
-				}
-
-				const rawUsage = response.llmOutput?.usage
-					|| response.generations[0]?.message?.response_metadata?.usage
-					|| {};
-				const cacheRead = rawUsage.cacheReadInputTokens || 0;
-				const cacheWrite = rawUsage.cacheWriteInputTokens || 0;
-
-				const usageMeta = (response.generations?.[0]?.message as any)?.usage_metadata;
-				const inputTokens = usageMeta?.input_tokens ?? 0;
-				const outputTokens = usageMeta?.output_tokens ?? 0;
-
-				if (response.generations?.length > 0) {
-					const msg = response.generations[0].message as any;
-					if (!msg.response_metadata) msg.response_metadata = {};
-
-					// P1 patch: custom metrics (kept for backward compat)
-					msg.response_metadata.promptCachingMetrics = this.formatCacheMetrics(cacheRead, cacheWrite);
-
-					// P1 patch: standard fields so intermediateSteps carries token data
-					// The Metrics Analyzer reads these from step.action.messageLog[].kwargs
-					msg.response_metadata.usage = {
-						input_tokens: inputTokens,
-						output_tokens: outputTokens,
-						cache_read_input_tokens: cacheRead,
-						cache_creation_input_tokens: cacheWrite,
-					};
-					msg.response_metadata.tokenUsage = {
-						cacheReadInputTokens: cacheRead,
-						cacheWriteInputTokens: cacheWrite,
-					};
-					msg.response_metadata.model_name = modelName;
-
-					// Set on additional_kwargs — survives LangChain serialization to intermediateSteps
-					if (!msg.additional_kwargs) msg.additional_kwargs = {};
-					msg.additional_kwargs.model = modelName;
-
-					// P1 patch: ensure usage_metadata exists with standard fields
-					msg.usage_metadata = {
-						input_tokens: inputTokens,
-						output_tokens: outputTokens,
-						total_tokens: inputTokens + outputTokens,
-						input_token_details: {
-							cache_read: cacheRead,
-							cache_creation: cacheWrite,
-						},
-					};
-
-					if (options.enableDebugLogs) {
-						logger.info('[BedrockAdvanced] response_metadata.usage: ' + JSON.stringify(msg.response_metadata.usage));
-						logger.info('[BedrockAdvanced] usage_metadata: ' + JSON.stringify(msg.usage_metadata));
-					}
-				}
-
-				// P1 patch: tokenUsage with cache metrics for N8nLlmTracing
-				if (usageMeta) {
-					response.llmOutput = {
-						...response.llmOutput,
-						tokenUsage: {
-							completionTokens: outputTokens,
-							promptTokens: inputTokens,
-							totalTokens: inputTokens + outputTokens,
-							cacheReadInputTokens: cacheRead,
-							cacheWriteInputTokens: cacheWrite,
-						},
-					};
-				}
-
-				return response;
-			}
-
-			async *_streamResponseChunks(messages: any[], generateOptions: any, runManager?: any) {
-				const sanitized = this.sanitizeMessages(messages);
-				const modifiedMessages = options.enablePromptCaching
-					? injectCachePoints(sanitized, options, logger)
-					: sanitized;
-				if (options.enableDebugLogs) {
-					logger.info('[BedrockAdvanced] [stream] modifiedMessages: ' + JSON.stringify(modifiedMessages));
-				}
-
-				const stream = super._streamResponseChunks(modifiedMessages, generateOptions, runManager);
-
-				for await (const chunk of stream) {
-					if (chunk.message?.response_metadata?.usage) {
-						const rawUsage = chunk.message.response_metadata.usage;
-						const cacheRead = rawUsage.cacheReadInputTokens || 0;
-						const cacheWrite = rawUsage.cacheWriteInputTokens || 0;
-						chunk.message.response_metadata.promptCachingMetrics = this.formatCacheMetrics(cacheRead, cacheWrite);
-						if (options.enableDebugLogs) {
-							logger.info('[BedrockAdvanced] [stream] promptCachingMetrics: ' + JSON.stringify(chunk.message.response_metadata.promptCachingMetrics));
-						}
-					}
-					yield chunk;
-				}
-			}
-
-			private formatCacheMetrics(readTokens: number, writeTokens: number) {
-				let status = 'NO CACHE';
-				if (readTokens > 0) status = 'CACHE HIT';
-				else if (writeTokens > 0) status = 'CACHE WRITTEN';
-
-				return {
-					status,
-					tokensReadFromCache: readTokens,
-					tokensWrittenToCache: writeTokens,
-				};
-			}
-		}
-
 		// Always use our patched subclass — it handles both the empty content fix
 		// (always needed) and prompt caching (when enabled).
 		const model = new PatchedChatBedrockConverse({
@@ -692,6 +530,8 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			region,
 			temperature: options.temperature,
 			maxTokens: options.maxTokensToSample,
+			patchOptions: options,
+			patchLogger: this.logger,
 			// P1 patch: custom tokensUsageParser to preserve cache metrics
 			callbacks: [new N8nLlmTracing(this, {
 				tokensUsageParser: (result: any) => {
