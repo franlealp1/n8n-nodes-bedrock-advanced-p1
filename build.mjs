@@ -43,11 +43,6 @@ async function build() {
 			entryPoints: ['src/credentials/AwsBedrockApiKeyP1.credentials.ts'],
 			outfile: 'dist/credentials/AwsBedrockApiKeyP1.credentials.js',
 		}),
-		esbuild.build({
-			...commonOptions,
-			entryPoints: ['src/nodes/LmChatBedrockClaudeStreaming/LmChatBedrockClaudeStreaming.node.ts'],
-			outfile: 'dist/nodes/LmChatBedrockClaudeStreaming/LmChatBedrockClaudeStreaming.node.js',
-		}),
 	]);
 
 	// 2. Build the index that re-exports both nodes
@@ -70,14 +65,6 @@ async function build() {
 			'dist/nodes/LmChatBedrockClaude/bedrock-claude.svg',
 		);
 	} catch { /* icon may not exist in src, keep existing */ }
-	// SVG lives under dist/ (git-tracked) rather than src/ — source from there.
-	try {
-		cpSync(
-			'dist/nodes/LmChatBedrockClaude/bedrock-claude.svg',
-			'dist/nodes/LmChatBedrockClaudeStreaming/bedrock-claude.svg',
-		);
-	} catch { /* icon may not exist, keep existing */ }
-
 	console.log('Build complete.');
 }
 

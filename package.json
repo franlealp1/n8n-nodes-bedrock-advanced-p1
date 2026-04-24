@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bedrock-advanced-p1",
-  "version": "0.8.0-alpha.1",
+  "version": "0.9.0-alpha.1",
   "description": "People1 fork of n8n-nodes-bedrock-advanced — cache metrics in output, empty content fix, coexists with original",
   "keywords": [
     "n8n-community-node-package",
@@ -32,8 +32,7 @@
     "n8nNodesApiVersion": 1,
     "nodes": [
       "dist/nodes/LmChatAwsBedrockAdvanced/LmChatAwsBedrockAdvanced.node.js",
-      "dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js",
-      "dist/nodes/LmChatBedrockClaudeStreaming/LmChatBedrockClaudeStreaming.node.js"
+      "dist/nodes/LmChatBedrockClaude/LmChatBedrockClaude.node.js"
     ],
     "credentials": [
       "dist/credentials/AwsBedrockApiKeyP1.credentials.js"

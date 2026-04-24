@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.9.0-alpha.1 (2026-04-24)
+
+### Refactor: extract PatchedChatBedrockConverse to own file
+
+The inline ChatBedrockConverse subclass that lived inside
+LmChatAwsBedrockAdvanced.node.ts supplyData() (158 lines) is now in its own
+file `src/nodes/LmChatAwsBedrockAdvanced/PatchedChatBedrockConverse.ts` with
+an explicit `patchOptions` + `patchLogger` constructor contract. The Advanced
+node keeps its public behavior byte-identical (15 byte-identity tests cover
+all 6 overrides: invocationParams, sanitizeMessages, _generateNonStreaming,
+_generate, _streamResponseChunks, formatCacheMetrics).
+
+### Feat: streaming-as-toggle on the Advanced node
+
+The existing `lmChatAwsBedrockAdvancedP1` node gains a new **"Streaming"**
+collection with 5 fields: Callback URL, Session ID, Auth Header Value,
+Batch Interval (Ms), Max Batch Chars.
+
+- **Callback URL empty (default)**: non-streaming Converse API, behavior
+  byte-identical to pre-0.9.0. Zero migration required for existing
+  workflows.
+- **Callback URL set**: node transparently uses a subclass
+  (`ChatAwsBedrockAdvancedStreaming`) that forces `streaming=true` and
+  overrides `_streamResponseChunks` with the streamCallback helper —
+  fire-and-forget POSTs `{streamId, seq, delta, done}` to the URL during
+  generation, batched by timer + char threshold. Output of the LLM to
+  the agent is unchanged; streaming is a side-channel.
+
+Auth router (apiKey + IAM), model pickers, cache stack (systemPromptBlocks,
+cacheSystemPrompt, cacheTools, cacheConversationHistory, cacheTtl),
+tokensUsageParser and `N8nLlmTracing` are all shared between both paths —
+no duplication.
+
+### Feat: metadata parity between streaming and non-streaming paths
+
+`_streamResponseChunks` now enriches chunks carrying usage with the same
+metadata shape that `_generate` sets on non-streaming (response_metadata.usage
+normalized, tokenUsage with cache fields, model_name, additional_kwargs.model,
+usage_metadata.input_token_details). `tokensUsageParser` in `supplyData`
+adds a fallback to `generations[0][0].message.response_metadata.tokenUsage`
+for cache fields — LangChain's streaming aggregation drops them from
+`llmOutput.tokenUsage` structurally (chat_models.cjs L227-237).
+
+Net effect: cache hit/miss telemetry is visible in both modes.
+
+### Fix: remove LmChatBedrockClaudeStreaming wrong-parent (PRP-1 correction)
+
+PRP-1 (merged in 0.8.0-alpha.1) built the streaming node on ChatBedrockClaude,
+which does not support authType=apiKey nor granular caching — it was inert
+for every production workflow. The wrong-parent folder and its artifacts
+are removed. Replaced by the streaming-as-toggle design above.
+
+---
+
 ## 0.7.4 (2026-04-22)
 
 ### Fix: model dropdown for Bedrock API key auth (loadOptionsMethod)
