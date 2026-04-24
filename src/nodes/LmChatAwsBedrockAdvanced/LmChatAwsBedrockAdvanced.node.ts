@@ -591,16 +591,24 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			maxTokens: options.maxTokensToSample,
 			patchOptions: options,
 			patchLogger: this.logger,
-			// P1 patch: custom tokensUsageParser to preserve cache metrics
+			// P1 patch: custom tokensUsageParser to preserve cache metrics.
+			// In non-streaming (streaming=false, _generate path): result.llmOutput.tokenUsage
+			//   carries completion/prompt/total/cacheRead/cacheWrite — populated by Patched._generate.
+			// In streaming (streaming=true, _streamResponseChunks path): LangChain builds
+			//   llmOutput.tokenUsage with ONLY completion/prompt/total from chunk.usage_metadata
+			//   (see @langchain/core chat_models.cjs L227-237); cache fields are dropped.
+			//   Patched._streamResponseChunks enriches chunk.response_metadata.tokenUsage
+			//   with cache fields — fall back to that path for cacheRead/cacheWrite.
 			callbacks: [new N8nLlmTracing(this, {
 				tokensUsageParser: (result: any) => {
 					const tu = result?.llmOutput?.tokenUsage ?? {};
+					const streamTu = result?.generations?.[0]?.[0]?.message?.response_metadata?.tokenUsage ?? {};
 					return {
 						completionTokens: tu.completionTokens ?? 0,
 						promptTokens: tu.promptTokens ?? 0,
 						totalTokens: (tu.completionTokens ?? 0) + (tu.promptTokens ?? 0),
-						cacheReadInputTokens: tu.cacheReadInputTokens ?? 0,
-						cacheWriteInputTokens: tu.cacheWriteInputTokens ?? 0,
+						cacheReadInputTokens: tu.cacheReadInputTokens ?? streamTu.cacheReadInputTokens ?? 0,
+						cacheWriteInputTokens: tu.cacheWriteInputTokens ?? streamTu.cacheWriteInputTokens ?? 0,
 					};
 				},
 			}) as any],

@@ -193,13 +193,60 @@ export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 		const stream = super._streamResponseChunks(modifiedMessages, generateOptions, runManager);
 
 		for await (const chunk of stream) {
+			// Enrich metadata on chunks carrying usage (typically the final metadata chunk)
+			// to match the shape that _generate populates on response_metadata, so downstream
+			// consumers (Metrics Analyzer reading response_metadata.usage.cache_*_input_tokens,
+			// N8nLlmTracing reading response_metadata.tokenUsage.cache*) see the same data
+			// regardless of whether execution went through _generate (streaming=false) or
+			// _streamResponseChunks (streaming=true).
 			if (chunk.message?.response_metadata?.usage) {
 				const rawUsage = chunk.message.response_metadata.usage;
 				const cacheRead = rawUsage.cacheReadInputTokens || 0;
 				const cacheWrite = rawUsage.cacheWriteInputTokens || 0;
+
+				// usage_metadata is populated by ChatBedrockConverse's super on the metadata chunk
+				// with input_tokens / output_tokens / total_tokens. Fall back to response_metadata.usage
+				// raw Bedrock keys if not yet set.
+				const usageMeta = (chunk.message as any).usage_metadata;
+				const inputTokens = usageMeta?.input_tokens ?? rawUsage.inputTokens ?? 0;
+				const outputTokens = usageMeta?.output_tokens ?? rawUsage.outputTokens ?? 0;
+
+				// P1 patch: custom metrics (kept for backward compat)
 				chunk.message.response_metadata.promptCachingMetrics = this.formatCacheMetrics(cacheRead, cacheWrite);
+
+				// P1 patch: standard fields so intermediateSteps carries token data (Metrics Analyzer)
+				chunk.message.response_metadata.usage = {
+					input_tokens: inputTokens,
+					output_tokens: outputTokens,
+					cache_read_input_tokens: cacheRead,
+					cache_creation_input_tokens: cacheWrite,
+				};
+				chunk.message.response_metadata.tokenUsage = {
+					cacheReadInputTokens: cacheRead,
+					cacheWriteInputTokens: cacheWrite,
+				};
+				chunk.message.response_metadata.model_name = this.model;
+
+				// Survives LangChain serialization to intermediateSteps
+				const msgAny = chunk.message as any;
+				if (!msgAny.additional_kwargs) msgAny.additional_kwargs = {};
+				msgAny.additional_kwargs.model = this.model;
+
+				// Extend usage_metadata with cache token details (non-destructive)
+				msgAny.usage_metadata = {
+					input_tokens: inputTokens,
+					output_tokens: outputTokens,
+					total_tokens: inputTokens + outputTokens,
+					input_token_details: {
+						cache_read: cacheRead,
+						cache_creation: cacheWrite,
+					},
+				};
+
 				if (this.patchOptions.enableDebugLogs) {
 					this.patchLogger.info('[BedrockAdvanced] [stream] promptCachingMetrics: ' + JSON.stringify(chunk.message.response_metadata.promptCachingMetrics));
+					this.patchLogger.info('[BedrockAdvanced] [stream] response_metadata.usage: ' + JSON.stringify(chunk.message.response_metadata.usage));
+					this.patchLogger.info('[BedrockAdvanced] [stream] usage_metadata: ' + JSON.stringify(msgAny.usage_metadata));
 				}
 			}
 			yield chunk;

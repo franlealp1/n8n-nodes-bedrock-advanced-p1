@@ -260,21 +260,10 @@ describe('PatchedChatBedrockConverse', () => {
 	// ── _streamResponseChunks ───────────────────────────────────────────────
 
 	describe('_streamResponseChunks', () => {
-		it('Case 9 — chunks carrying usage get promptCachingMetrics injected; chunks without usage pass through unchanged', async () => {
+		it('Case 9a — chunks without usage pass through unchanged', async () => {
 			async function* fakeStream() {
-				yield {
-					text: 'a',
-					message: { content: 'a' },
-				} as any;
-				yield {
-					text: '',
-					message: {
-						content: '',
-						response_metadata: {
-							usage: { cacheReadInputTokens: 10, cacheWriteInputTokens: 0 },
-						},
-					},
-				} as any;
+				yield { text: 'a', message: { content: 'a' } } as any;
+				yield { text: 'b', message: { content: 'b' } } as any;
 			}
 			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
 				fakeStream as any,
@@ -285,11 +274,107 @@ describe('PatchedChatBedrockConverse', () => {
 
 			expect(chunks).toHaveLength(2);
 			expect(chunks[0].message.response_metadata).toBeUndefined();
-			expect(chunks[1].message.response_metadata.promptCachingMetrics).toEqual({
+			expect(chunks[1].message.response_metadata).toBeUndefined();
+		});
+
+		it('Case 9b — chunk with usage gets promptCachingMetrics injected', async () => {
+			async function* fakeStream() {
+				yield {
+					text: '',
+					message: {
+						content: '',
+						response_metadata: {
+							usage: { cacheReadInputTokens: 10, cacheWriteInputTokens: 0 },
+						},
+						usage_metadata: { input_tokens: 100, output_tokens: 5, total_tokens: 105 },
+					},
+				} as any;
+			}
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				fakeStream as any,
+			);
+
+			const model = makeModel({});
+			const chunks = await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+
+			expect(chunks[0].message.response_metadata.promptCachingMetrics).toEqual({
 				status: 'CACHE HIT',
 				tokensReadFromCache: 10,
 				tokensWrittenToCache: 0,
 			});
+		});
+
+		it('Case 9c — streaming enrichment matches _generate metadata shape (parity)', async () => {
+			async function* fakeStream() {
+				yield {
+					text: '',
+					message: {
+						content: '',
+						response_metadata: {
+							usage: { cacheReadInputTokens: 123, cacheWriteInputTokens: 45 },
+						},
+						usage_metadata: { input_tokens: 500, output_tokens: 10, total_tokens: 510 },
+					},
+				} as any;
+			}
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				fakeStream as any,
+			);
+
+			const model = makeModel({});
+			const chunks = await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+			const msg = chunks[0].message;
+
+			// Mirrors _generate's Case 8 assertions — same fields on streaming path.
+			expect(msg.response_metadata.usage).toEqual({
+				input_tokens: 500,
+				output_tokens: 10,
+				cache_read_input_tokens: 123,
+				cache_creation_input_tokens: 45,
+			});
+			expect(msg.response_metadata.tokenUsage).toEqual({
+				cacheReadInputTokens: 123,
+				cacheWriteInputTokens: 45,
+			});
+			expect(msg.response_metadata.model_name).toBe('anthropic.claude-3-5-sonnet-20240620-v1:0');
+			expect(msg.additional_kwargs.model).toBe('anthropic.claude-3-5-sonnet-20240620-v1:0');
+			expect(msg.usage_metadata).toEqual({
+				input_tokens: 500,
+				output_tokens: 10,
+				total_tokens: 510,
+				input_token_details: { cache_read: 123, cache_creation: 45 },
+			});
+		});
+
+		it('Case 9d — when super omits usage_metadata, falls back to raw Bedrock keys (inputTokens/outputTokens)', async () => {
+			async function* fakeStream() {
+				yield {
+					text: '',
+					message: {
+						content: '',
+						response_metadata: {
+							usage: {
+								inputTokens: 200,
+								outputTokens: 20,
+								cacheReadInputTokens: 50,
+								cacheWriteInputTokens: 10,
+							},
+						},
+						// no usage_metadata
+					},
+				} as any;
+			}
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				fakeStream as any,
+			);
+
+			const model = makeModel({});
+			const chunks = await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+			const msg = chunks[0].message;
+
+			expect(msg.response_metadata.usage.input_tokens).toBe(200);
+			expect(msg.response_metadata.usage.output_tokens).toBe(20);
+			expect(msg.usage_metadata.total_tokens).toBe(220);
 		});
 	});
 
