@@ -393,21 +393,21 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				placeholder: 'Add streaming option',
 				default: {},
 				description:
-					'Optional: emit fire-and-forget HTTP POSTs with text deltas during generation. Leave Callback URL empty for standard non-streaming behavior (identical to pre-0.9.0 Advanced node).',
+					'Optional: emit fire-and-forget HTTP POSTs with text deltas and semantic events (tool-call-start, agent-finish) during generation. Leave Callback URL empty for standard non-streaming behavior (identical to pre-0.9.0 Advanced node).',
 				options: [
 					{
 						displayName: 'Callback URL',
 						name: 'callbackUrl',
 						type: 'string',
 						default: '',
-						description: 'HTTP endpoint to POST {streamId, seq, delta, done} during generation. Empty = no streaming (uses non-streaming Converse API; byte-identical to pre-0.9.0 behavior).',
+						description: 'Base URL of the streaming endpoints. The node POSTs deltas to {url}/stream-token and semantic events (tool-call-start, agent-finish) to {url}/agent-event. Trailing slash is trimmed. Empty = no streaming (uses non-streaming Converse API; byte-identical to pre-0.9.0 behavior).',
 					},
 					{
-						displayName: 'Session ID',
+						displayName: 'Stream Session Id',
 						name: 'sessionId',
 						type: 'string',
 						default: '',
-						description: 'streamId sent in each POST (recommended: set to {{ $json.chatId }} from the workflow trigger).',
+						description: 'streamId sent in each POST. Free expression of the workflow (e.g. {{ $json.chatId }}, {{ $json.turnId }}, etc.) — semantics decided by the backend that consumes the events.',
 					},
 					{
 						displayName: 'Auth Header Value',
@@ -416,6 +416,20 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 						typeOptions: { password: true },
 						default: '',
 						description: 'Value for x-webhook-auth header (Flock validateN8NWebhook).',
+					},
+					{
+						displayName: 'Stream Agent Name',
+						name: 'agentName',
+						type: 'string',
+						default: '',
+						description: 'Label of the agent producing the stream (e.g. "Copiloto", "Onboarding"). Included as metadata in every event body.',
+					},
+					{
+						displayName: 'Stream Agent Color',
+						name: 'agentColor',
+						type: 'string',
+						default: '',
+						description: 'Color of the agent (hex or token) for visual identification in frontend. Included as metadata in every event body.',
 					},
 					{
 						displayName: 'Batch Interval (Ms)',
@@ -495,6 +509,8 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			callbackUrl?: string;
 			sessionId?: string;
 			authHeaderValue?: string;
+			agentName?: string;
+			agentColor?: string;
 			batchIntervalMs?: number;
 			maxBatchChars?: number;
 		};
@@ -621,6 +637,8 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 				streamCallbackUrl:      streaming.callbackUrl,
 				streamSessionId:        streaming.sessionId,
 				streamAuthHeaderValue:  streaming.authHeaderValue,
+				streamAgentName:        streaming.agentName,
+				streamAgentColor:       streaming.agentColor,
 				streamBatchIntervalMs:  streaming.batchIntervalMs ?? 60,
 				streamMaxBatchChars:    streaming.maxBatchChars   ?? 120,
 			})
