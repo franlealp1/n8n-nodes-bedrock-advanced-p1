@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.10.0-alpha.1 (2026-04-26)
+
+### Feat: Side-channel semantic events (`tool-call-start`, `agent-finish`)
+
+The `_streamResponseChunks` override of `ChatAwsBedrockAdvancedStreaming` now
+inspects three signal types in addition to text deltas:
+
+- **tool_call_chunks** (Bedrock `contentBlockStart`+`contentBlockDelta` with
+  `toolUse`): name/id from the start chunk and JSON-fragment args from the
+  delta chunks are accumulated by `index` and emitted as a single
+  `tool-call-start` POST when the stream closes with `stopReason: 'tool_use'`.
+  Body: `{streamId, seq, type:'tool-call-start', tools:[{name,args,id}], ...}`.
+- **messageStop with stopReason ∈ {end_turn, max_tokens, stop_sequence}**:
+  emits an `agent-finish` POST with the aggregated text of the stream + the
+  finish reason. Body: `{streamId, seq, type:'agent-finish', text, finishReason, ...}`.
+- Existing **text deltas**: unchanged. Now sent with explicit `type:'delta'`
+  discriminator and routed to a different path (see below).
+
+Body schema gains a `type` discriminator (`'delta' | 'tool-call-start' |
+'agent-finish' | 'error'`). Backend backwards-compat: a body without `type`
+is interpreted as `delta` (the v0.9.0 shape).
+
+### Feat: Callback URL is now a base URL (path routing)
+
+Previously the Callback URL was the full path of every POST. Now the node
+treats it as a **base** and internally appends:
+- `${url}/stream-token` for `delta` events (high frequency, non-persistent).
+- `${url}/agent-event` for `tool-call-start` / `agent-finish` / `error`
+  events (low frequency, persistent).
+
+Trailing slash on the URL is trimmed. Auth header (`x-webhook-auth`) is
+identical for both endpoints.
+
+### Feat: Two new optional descriptor params
+
+The "Streaming" collection on the `lmChatAwsBedrockAdvancedP1` node gains:
+- **Stream Agent Name** (`agentName`): label included in every event body.
+- **Stream Agent Color** (`agentColor`): color token included in every body.
+
+Existing **Session ID** field renamed in UI to **Stream Session Id**
+(generic semantics — workflow decides if value is `chatId`, `turnId`, etc.).
+Internal field name `sessionId` preserved for workflow JSON compatibility.
+
+### Byte-identity preserved (AC1)
+
+With Callback URL empty, the async generator output is bit-identical to
+`PatchedChatBedrockConverse._streamResponseChunks`. Zero allocations, zero
+timers, zero network calls. Verified by `ChatAwsBedrockAdvancedStreaming.test.ts`
+Case 1 + Case 2 with the extended rich `fakeSuperStream` (text deltas +
+tool_call_chunks + messageStop).
+
+### Migration
+
+- Workflows with **Callback URL empty** (the current state of all noprod
+  deployments): zero migration. Behavior identical.
+- Workflows with **Callback URL set** to a path that points to an endpoint
+  expecting v0.9.0 shape: must update the URL to the base prefix (drop the
+  path component); backend (separate release) will expose `/stream-token`
+  and `/agent-event` separately.
+
+---
+
 ## 0.9.0-alpha.1 (2026-04-24)
 
 ### Refactor: extract PatchedChatBedrockConverse to own file

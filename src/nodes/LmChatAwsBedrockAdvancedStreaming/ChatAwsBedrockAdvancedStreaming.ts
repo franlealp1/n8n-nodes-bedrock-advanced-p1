@@ -1,6 +1,7 @@
 /**
  * ChatAwsBedrockAdvancedStreaming — subclass of PatchedChatBedrockConverse that
- * side-channels text deltas to an HTTP callback during streaming generation.
+ * side-channels text deltas AND semantic events (tool-call-start, agent-finish)
+ * to an HTTP base URL during streaming generation.
  *
  * Design constraint mirrored from PRP-1 (wrong-parent, removed in C3): the
  * Patched base class must NOT be modified (diff=0 for its .ts after this
@@ -12,7 +13,7 @@
  * When `streamCallbackUrl` is empty, `createStreamCallback` returns a no-op
  * session and the yielded `ChatGenerationChunk` sequence is byte-identical to
  * PatchedChatBedrockConverse's own `_streamResponseChunks` output for the same
- * input. Verified in ChatAwsBedrockAdvancedStreaming.test.ts.
+ * input. Verified in ChatAwsBedrockAdvancedStreaming.test.ts (Case 1, AC1 line).
  */
 
 import type { BaseMessage } from '@langchain/core/messages';
@@ -29,6 +30,8 @@ export interface ChatAwsBedrockAdvancedStreamingInput extends PatchedChatBedrock
 	streamCallbackUrl?: string;
 	streamSessionId?: string;
 	streamAuthHeaderValue?: string;
+	streamAgentName?: string;
+	streamAgentColor?: string;
 	streamBatchIntervalMs?: number;   // default 60
 	streamMaxBatchChars?: number;     // default 120
 }
@@ -42,6 +45,8 @@ export class ChatAwsBedrockAdvancedStreaming extends PatchedChatBedrockConverse 
 			callbackUrl:      fields.streamCallbackUrl,
 			sessionId:        fields.streamSessionId,
 			authHeaderValue:  fields.streamAuthHeaderValue,
+			agentName:        fields.streamAgentName,
+			agentColor:       fields.streamAgentColor,
 			batchIntervalMs:  fields.streamBatchIntervalMs ?? 60,
 			maxBatchChars:    fields.streamMaxBatchChars   ?? 120,
 			logger:           fields.patchLogger,
@@ -62,7 +67,7 @@ export class ChatAwsBedrockAdvancedStreaming extends PatchedChatBedrockConverse 
 		const session = createStreamCallback(this.streamCfg);
 		try {
 			for await (const chunk of super._streamResponseChunks(messages, options, runManager)) {
-				session.appendIfText(chunk);
+				session.processChunk(chunk);
 				yield chunk;
 			}
 		} finally {
