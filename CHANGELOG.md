@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.10.0-alpha.2 (2026-05-07)
+
+### Feat: Token usage on `agent-finish` and `tool-call-start` events
+
+`streamCallback` now captures the token usage emitted on the metadata chunk
+by `PatchedChatBedrockConverse._streamResponseChunks` (response_metadata.usage,
+enriched with `input_tokens` / `output_tokens` / `cache_read_input_tokens` /
+`cache_creation_input_tokens`) and forwards it on the next semantic event:
+
+- **`agent-finish`**: carries `usage` for the final round of the turn.
+- **`tool-call-start`**: carries `usage` for each intermediate round, so
+  multi-round agents (tool use, planner) account every LLM call instead of
+  only the closing one.
+
+`usage` is always optional. If no metadata chunk arrives (or no usage was
+enriched on it), the field is absent — back-compat with v0.10.0-alpha.1
+consumers that don't read it. AC1 byte-identity (`callbackUrl: ''` →
+zero allocation, zero network) preserved.
+
+Wire shape (`UsageData`):
+
+```ts
+{
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+```
+
+This unlocks Plan #69 D1' / D3 — real-time inline cost capture from the
+fork, complementary to Sistema B (Posthoc REST API). Cross-validation
+between the two sources is the new criterion of the billable-grade gate.
+
 ## 0.10.0-alpha.1 (2026-04-26)
 
 ### Feat: Side-channel semantic events (`tool-call-start`, `agent-finish`)

@@ -78,6 +78,23 @@ function chunkMessageStop(stopReason: string): any {
 	};
 }
 
+function chunkUsage(input: number, output: number, cacheRead = 0, cacheCreation = 0): any {
+	return {
+		text: '',
+		message: {
+			content: '',
+			response_metadata: {
+				usage: {
+					input_tokens: input,
+					output_tokens: output,
+					cache_read_input_tokens: cacheRead,
+					cache_creation_input_tokens: cacheCreation,
+				},
+			},
+		},
+	};
+}
+
 function baseCfg(overrides: Partial<StreamCallbackConfig> = {}): StreamCallbackConfig {
 	return {
 		callbackUrl: 'http://example.test/cb',
@@ -280,6 +297,26 @@ describe('createStreamCallback', () => {
 		expect(toolCall!.url).toBe('http://example.test/cb/agent-event');
 	});
 
+	it('tool-call-start carries usage when usage chunk precedes tool_use stopReason (multi-round coverage)', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch();
+		const session = createStreamCallback(baseCfg({ fetchImpl }));
+		session.processChunk(chunkToolStart(0, 'doX', 'tu_1'));
+		session.processChunk(chunkToolDelta(0, '{}'));
+		session.processChunk(chunkUsage(800, 200, 4000, 0));
+		session.processChunk(chunkMessageStop('tool_use'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+		const toolCall = calls.find((c) => c.body.type === 'tool-call-start');
+		expect(toolCall).toBeDefined();
+		expect(toolCall!.body.usage).toEqual({
+			input_tokens: 800,
+			output_tokens: 200,
+			cache_read_input_tokens: 4000,
+			cache_creation_input_tokens: 0,
+		});
+	});
+
 	it('flushFinal with stopReason="end_turn" emits agent-finish with text aggregated and finishReason', async () => {
 		vi.useFakeTimers();
 		const { fetchImpl, calls } = makeFakeFetch();
@@ -320,6 +357,57 @@ describe('createStreamCallback', () => {
 		const finish = calls.find((c) => c.body.type === 'agent-finish');
 		expect(finish).toBeDefined();
 		expect(finish!.body.finishReason).toBe('stop_sequence');
+	});
+
+	it('agent-finish carries usage when usage chunk precedes messageStop end_turn', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch();
+		const session = createStreamCallback(baseCfg({ fetchImpl }));
+		session.processChunk(chunkWithText('Result'));
+		session.processChunk(chunkUsage(1234, 567, 5000, 0));
+		session.processChunk(chunkMessageStop('end_turn'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+		const finish = calls.find((c) => c.body.type === 'agent-finish');
+		expect(finish).toBeDefined();
+		expect(finish!.body.text).toBe('Result');
+		expect(finish!.body.finishReason).toBe('end_turn');
+		expect(finish!.body.usage).toEqual({
+			input_tokens: 1234,
+			output_tokens: 567,
+			cache_read_input_tokens: 5000,
+			cache_creation_input_tokens: 0,
+		});
+	});
+
+	it('agent-finish omits usage field when no usage chunk arrived (back-compat)', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch();
+		const session = createStreamCallback(baseCfg({ fetchImpl }));
+		session.processChunk(chunkWithText('No tokens'));
+		session.processChunk(chunkMessageStop('end_turn'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+		const finish = calls.find((c) => c.body.type === 'agent-finish');
+		expect(finish).toBeDefined();
+		expect('usage' in finish!.body).toBe(false);
+	});
+
+	it('no-op fast path (callbackUrl empty) does NOT fetch even with usage chunks (AC1 byte-identity)', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch();
+		const session = createStreamCallback({
+			callbackUrl: '',
+			batchIntervalMs: 60,
+			maxBatchChars: 120,
+			fetchImpl,
+		});
+		session.processChunk(chunkWithText('hi'));
+		session.processChunk(chunkUsage(100, 50, 0, 0));
+		session.processChunk(chunkMessageStop('end_turn'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(calls).toHaveLength(0);
 	});
 
 	it('flushFinal with stopReason undefined emits only delta done:true (no tool-call-start, no agent-finish)', async () => {

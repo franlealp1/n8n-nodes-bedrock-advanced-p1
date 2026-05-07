@@ -26,6 +26,19 @@ export interface StreamCallbackLogger {
 }
 
 /**
+ * Token usage data captured from the metadata chunk emitted by Bedrock Converse.
+ * Shape mirrors the enrichment done in PatchedChatBedrockConverse.ts:218-223:
+ * {input,output,cache_read,cache_creation}_input_tokens. Sent on `agent-finish`
+ * events to enable real-time cost capture downstream (Plan #69 D1' / D3).
+ */
+export interface UsageData {
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_input_tokens: number;
+	cache_creation_input_tokens: number;
+}
+
+/**
  * Discriminated union emitted by the helper. Backend backwards-compat: a body without
  * `type` is interpreted as `delta` (the v0.9.0 shape). The helper always emits `type`
  * explicitly to reduce ambiguity in logs/debug.
@@ -46,6 +59,7 @@ export type CallbackEvent =
 			streamId?: string;
 			seq: number;
 			tools: Array<{ name: string; args: unknown; id: string }>;
+			usage?: UsageData;
 			agentName?: string;
 			color?: string;
 			timestamp: string;
@@ -56,6 +70,7 @@ export type CallbackEvent =
 			seq: number;
 			text: string;
 			finishReason: 'end_turn' | 'stop_sequence' | 'max_tokens';
+			usage?: UsageData;
 			agentName?: string;
 			color?: string;
 			timestamp: string;
@@ -129,6 +144,7 @@ export function createStreamCallback(config: StreamCallbackConfig): StreamCallba
 	let closed = false;
 	const toolAccum: Map<number, ToolAccumEntry> = new Map();
 	let pendingStopReason: string | null = null;
+	let pendingUsage: UsageData | null = null;
 
 	function buildEnvelope<T extends Record<string, unknown>>(extra: T): T & {
 		streamId?: string;
@@ -167,17 +183,28 @@ export function createStreamCallback(config: StreamCallbackConfig): StreamCallba
 		sendPost(deltaUrl, body);
 	}
 
-	function postToolCallStart(tools: Array<{ name: string; args: unknown; id: string }>): void {
-		const body = buildEnvelope({ type: 'tool-call-start' as const, tools }) as CallbackEvent;
+	function postToolCallStart(
+		tools: Array<{ name: string; args: unknown; id: string }>,
+		usage?: UsageData,
+	): void {
+		const extra: Record<string, unknown> = { type: 'tool-call-start' as const, tools };
+		if (usage) extra.usage = usage;
+		const body = buildEnvelope(extra) as CallbackEvent;
 		sendPost(agentEventUrl, body);
 	}
 
-	function postAgentFinish(text: string, finishReason: 'end_turn' | 'stop_sequence' | 'max_tokens'): void {
-		const body = buildEnvelope({
+	function postAgentFinish(
+		text: string,
+		finishReason: 'end_turn' | 'stop_sequence' | 'max_tokens',
+		usage?: UsageData,
+	): void {
+		const extra: Record<string, unknown> = {
 			type: 'agent-finish' as const,
 			text,
 			finishReason,
-		}) as CallbackEvent;
+		};
+		if (usage) extra.usage = usage;
+		const body = buildEnvelope(extra) as CallbackEvent;
 		sendPost(agentEventUrl, body);
 	}
 
@@ -216,6 +243,20 @@ export function createStreamCallback(config: StreamCallbackConfig): StreamCallba
 	return {
 		processChunk(chunk: ChatGenerationChunk): void {
 			if (closed) return;
+
+			// 0. Capture token usage emitted by PatchedChatBedrockConverse on the
+			//    metadata chunk (see PatchedChatBedrockConverse.ts:218-223). Does NOT
+			//    early-return — this chunk may also carry messageStop or text. Idempotent:
+			//    last write wins, but in practice the metadata chunk fires once per stream.
+			const u = (chunk as any)?.message?.response_metadata?.usage;
+			if (u && typeof u === 'object' && typeof u.input_tokens === 'number') {
+				pendingUsage = {
+					input_tokens: u.input_tokens,
+					output_tokens: u.output_tokens ?? 0,
+					cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+					cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+				};
+			}
 
 			// 1. tool_call_chunks (start carries name+id, deltas carry args fragments).
 			//    These chunks contribute neither to delta text nor to aggregatedText.
@@ -272,11 +313,12 @@ export function createStreamCallback(config: StreamCallbackConfig): StreamCallba
 						args: tryParseJson(e.argsBuffer),
 					}))
 					.filter((t) => t.name);
-				if (tools.length > 0) postToolCallStart(tools);
+				if (tools.length > 0) postToolCallStart(tools, pendingUsage ?? undefined);
 			} else if (pendingStopReason !== null && FINISH_REASONS.has(pendingStopReason)) {
 				postAgentFinish(
 					aggregatedText,
 					pendingStopReason as 'end_turn' | 'stop_sequence' | 'max_tokens',
+					pendingUsage ?? undefined,
 				);
 			}
 			// Other stopReasons (guardrail_intervened, content_filtered) → no-op in v1.
