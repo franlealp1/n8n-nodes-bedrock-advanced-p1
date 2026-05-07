@@ -177526,13 +177526,15 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     }
     const stream = super._streamResponseChunks(modifiedMessages, generateOptions, runManager);
     for await (const chunk of stream) {
-      if (chunk.message?.response_metadata?.usage) {
-        const rawUsage = chunk.message.response_metadata.usage;
-        const cacheRead = rawUsage.cacheReadInputTokens || 0;
-        const cacheWrite = rawUsage.cacheWriteInputTokens || 0;
+      const rawMeta = chunk.message?.response_metadata?.metadata?.usage;
+      const rawDirect = chunk.message?.response_metadata?.usage;
+      if (rawMeta || rawDirect) {
+        const rawUsage = rawMeta ?? rawDirect;
+        const cacheRead = rawUsage.cacheReadInputTokens ?? rawUsage.cache_read_input_tokens ?? 0;
+        const cacheWrite = rawUsage.cacheWriteInputTokens ?? rawUsage.cache_creation_input_tokens ?? 0;
         const usageMeta = chunk.message.usage_metadata;
-        const inputTokens = usageMeta?.input_tokens ?? rawUsage.inputTokens ?? 0;
-        const outputTokens = usageMeta?.output_tokens ?? rawUsage.outputTokens ?? 0;
+        const inputTokens = usageMeta?.input_tokens ?? rawUsage.inputTokens ?? rawUsage.input_tokens ?? 0;
+        const outputTokens = usageMeta?.output_tokens ?? rawUsage.outputTokens ?? rawUsage.output_tokens ?? 0;
         chunk.message.response_metadata.promptCachingMetrics = this.formatCacheMetrics(cacheRead, cacheWrite);
         chunk.message.response_metadata.usage = {
           input_tokens: inputTokens,
@@ -177615,6 +177617,7 @@ function createStreamCallback(config2) {
   let closed = false;
   const toolAccum = /* @__PURE__ */ new Map();
   let pendingStopReason = null;
+  let pendingUsage = null;
   function buildEnvelope(extra) {
     const env = {
       streamId: sessionId,
@@ -177639,16 +177642,20 @@ function createStreamCallback(config2) {
     const body = buildEnvelope({ type: "delta", delta, done });
     sendPost(deltaUrl, body);
   }
-  function postToolCallStart(tools) {
-    const body = buildEnvelope({ type: "tool-call-start", tools });
+  function postToolCallStart(tools, usage) {
+    const extra = { type: "tool-call-start", tools };
+    if (usage) extra.usage = usage;
+    const body = buildEnvelope(extra);
     sendPost(agentEventUrl, body);
   }
-  function postAgentFinish(text, finishReason) {
-    const body = buildEnvelope({
+  function postAgentFinish(text, finishReason, usage) {
+    const extra = {
       type: "agent-finish",
       text,
       finishReason
-    });
+    };
+    if (usage) extra.usage = usage;
+    const body = buildEnvelope(extra);
     sendPost(agentEventUrl, body);
   }
   function flushBuffered() {
@@ -177683,6 +177690,15 @@ function createStreamCallback(config2) {
   return {
     processChunk(chunk) {
       if (closed) return;
+      const u5 = chunk?.message?.response_metadata?.usage;
+      if (u5 && typeof u5 === "object" && typeof u5.input_tokens === "number") {
+        pendingUsage = {
+          input_tokens: u5.input_tokens,
+          output_tokens: u5.output_tokens ?? 0,
+          cache_read_input_tokens: u5.cache_read_input_tokens ?? 0,
+          cache_creation_input_tokens: u5.cache_creation_input_tokens ?? 0
+        };
+      }
       const tcc = chunk?.message?.tool_call_chunks?.[0];
       if (tcc) {
         recordToolChunk(tcc);
@@ -177719,11 +177735,12 @@ function createStreamCallback(config2) {
           id: e5.id ?? "",
           args: tryParseJson(e5.argsBuffer)
         })).filter((t5) => t5.name);
-        if (tools.length > 0) postToolCallStart(tools);
+        if (tools.length > 0) postToolCallStart(tools, pendingUsage ?? void 0);
       } else if (pendingStopReason !== null && FINISH_REASONS.has(pendingStopReason)) {
         postAgentFinish(
           aggregatedText,
-          pendingStopReason
+          pendingStopReason,
+          pendingUsage ?? void 0
         );
       }
     }

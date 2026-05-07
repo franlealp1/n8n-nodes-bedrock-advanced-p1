@@ -193,23 +193,27 @@ export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 		const stream = super._streamResponseChunks(modifiedMessages, generateOptions, runManager);
 
 		for await (const chunk of stream) {
-			// Enrich metadata on chunks carrying usage (typically the final metadata chunk)
-			// to match the shape that _generate populates on response_metadata, so downstream
-			// consumers (Metrics Analyzer reading response_metadata.usage.cache_*_input_tokens,
-			// N8nLlmTracing reading response_metadata.tokenUsage.cache*) see the same data
-			// regardless of whether execution went through _generate (streaming=false) or
-			// _streamResponseChunks (streaming=true).
-			if (chunk.message?.response_metadata?.usage) {
-				const rawUsage = chunk.message.response_metadata.usage;
-				const cacheRead = rawUsage.cacheReadInputTokens || 0;
-				const cacheWrite = rawUsage.cacheWriteInputTokens || 0;
+			// Enrich metadata on chunks carrying usage (typically the messageDelta chunk).
+			// Raw Bedrock Converse streaming puts usage under response_metadata.metadata.usage
+			// (camelCase keys from the Bedrock API). _generate puts it at response_metadata.usage
+			// (snake_case). We normalise both paths here so downstream consumers see the same
+			// shape regardless of whether execution went through _generate or _streamResponseChunks.
+			// NOTE: check nested metadata.usage first — that is where LangChain BedrockConverse
+			// places it on streaming chunks. response_metadata.usage (top-level) is only present
+			// if this patch already ran (guard against double-patching).
+			const rawMeta = (chunk.message as any)?.response_metadata?.metadata?.usage;
+			const rawDirect = chunk.message?.response_metadata?.usage;
+			if (rawMeta || rawDirect) {
+				// camelCase (rawMeta from Bedrock) or snake_case (rawDirect already patched)
+				const rawUsage = rawMeta ?? rawDirect;
+				const cacheRead = rawUsage.cacheReadInputTokens ?? rawUsage.cache_read_input_tokens ?? 0;
+				const cacheWrite = rawUsage.cacheWriteInputTokens ?? rawUsage.cache_creation_input_tokens ?? 0;
 
-				// usage_metadata is populated by ChatBedrockConverse's super on the metadata chunk
-				// with input_tokens / output_tokens / total_tokens. Fall back to response_metadata.usage
-				// raw Bedrock keys if not yet set.
+				// usage_metadata is populated by ChatBedrockConverse super on the metadata chunk.
+				// Fall back to the raw Bedrock camelCase keys if not yet set.
 				const usageMeta = (chunk.message as any).usage_metadata;
-				const inputTokens = usageMeta?.input_tokens ?? rawUsage.inputTokens ?? 0;
-				const outputTokens = usageMeta?.output_tokens ?? rawUsage.outputTokens ?? 0;
+				const inputTokens = usageMeta?.input_tokens ?? rawUsage.inputTokens ?? rawUsage.input_tokens ?? 0;
+				const outputTokens = usageMeta?.output_tokens ?? rawUsage.outputTokens ?? rawUsage.output_tokens ?? 0;
 
 				// P1 patch: custom metrics (kept for backward compat)
 				chunk.message.response_metadata.promptCachingMetrics = this.formatCacheMetrics(cacheRead, cacheWrite);
