@@ -41,9 +41,37 @@ export interface PatchLogger {
 	error: (msg: string) => void;
 }
 
+/**
+ * Cache usage captured straight off the Bedrock stream.
+ *
+ * Exists because LangChain's chunk aggregation drops it: by the time
+ * `tokensUsageParser` runs, `generations` is empty and `llmOutput.tokenUsage`
+ * carries the cache fields as literal `0` rather than `undefined` — so a `??`
+ * chain can neither detect nor recover them. The node writes what Bedrock
+ * actually sent here, and the parser reads it as the authoritative source for
+ * the two cache fields. See issue #633.
+ */
+export interface StreamCacheUsage {
+	cacheReadInputTokens: number;
+	cacheWriteInputTokens: number;
+}
+
+/**
+ * One-shot handoff between the streaming path and `tokensUsageParser`.
+ *
+ * Deliberately a shared box rather than state on the model: the parser lives in
+ * a callback created alongside the model, and both close over this same object.
+ * `last` is cleared on read so a value can never be attributed to a later call
+ * that produced no usage of its own.
+ */
+export interface StreamUsageSink {
+	last: StreamCacheUsage | null;
+}
+
 export interface PatchedChatBedrockConverseInput extends ChatBedrockConverseInput {
 	patchOptions: PatchOptions;
 	patchLogger?: PatchLogger;
+	streamUsageSink?: StreamUsageSink;
 }
 
 const NOOP_LOGGER: PatchLogger = {
@@ -55,11 +83,13 @@ const NOOP_LOGGER: PatchLogger = {
 export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 	protected readonly patchOptions: PatchOptions;
 	protected readonly patchLogger: PatchLogger;
+	protected readonly streamUsageSink?: StreamUsageSink;
 
 	constructor(fields: PatchedChatBedrockConverseInput) {
 		super(fields);
 		this.patchOptions = fields.patchOptions;
 		this.patchLogger = fields.patchLogger ?? NOOP_LOGGER;
+		this.streamUsageSink = fields.streamUsageSink;
 	}
 
 	invocationParams(invokeOptions?: any): any {
@@ -208,6 +238,18 @@ export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 				const rawUsage = rawMeta ?? rawDirect;
 				const cacheRead = rawUsage.cacheReadInputTokens ?? rawUsage.cache_read_input_tokens ?? 0;
 				const cacheWrite = rawUsage.cacheWriteInputTokens ?? rawUsage.cache_creation_input_tokens ?? 0;
+
+				// #633: hand the cache figures to `tokensUsageParser` out of band. Everything we
+				// write onto the chunk below is lost in LangChain's aggregation — `generations`
+				// arrives empty and `llmOutput.tokenUsage` reports both cache fields as 0 — so
+				// this sink is the only path by which the real numbers reach the metrics.
+				// Last write wins within a call: Bedrock sends usage once, on the metadata event.
+				if (this.streamUsageSink) {
+					this.streamUsageSink.last = {
+						cacheReadInputTokens: cacheRead,
+						cacheWriteInputTokens: cacheWrite,
+					};
+				}
 
 				// usage_metadata is populated by ChatBedrockConverse super on the metadata chunk.
 				// Fall back to the raw Bedrock camelCase keys if not yet set.

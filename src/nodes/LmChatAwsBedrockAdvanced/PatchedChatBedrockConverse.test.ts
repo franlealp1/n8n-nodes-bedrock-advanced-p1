@@ -6,6 +6,7 @@ import { ChatBedrockConverse } from '@langchain/aws';
 import {
 	PatchedChatBedrockConverse,
 	type PatchOptions,
+	type StreamUsageSink,
 } from './PatchedChatBedrockConverse';
 
 /**
@@ -19,7 +20,11 @@ function stubClient(): BedrockRuntimeClient {
 	} as unknown as BedrockRuntimeClient;
 }
 
-function makeModel(patchOptions: PatchOptions, loggerSink?: { info: any; warn: any; error: any }) {
+function makeModel(
+	patchOptions: PatchOptions,
+	loggerSink?: { info: any; warn: any; error: any },
+	streamUsageSink?: StreamUsageSink,
+) {
 	return new PatchedChatBedrockConverse({
 		client: stubClient(),
 		model: 'anthropic.claude-3-5-sonnet-20240620-v1:0',
@@ -28,6 +33,7 @@ function makeModel(patchOptions: PatchOptions, loggerSink?: { info: any; warn: a
 		patchLogger: loggerSink
 			? { info: loggerSink.info, warn: loggerSink.warn, error: loggerSink.error }
 			: undefined,
+		streamUsageSink,
 	});
 }
 
@@ -254,6 +260,109 @@ describe('PatchedChatBedrockConverse', () => {
 				cacheReadInputTokens: 123,
 				cacheWriteInputTokens: 45,
 			});
+		});
+	});
+
+	// ── streamUsageSink (#633) ──────────────────────────────────────────────
+
+	/**
+	 * The streaming half of the #633 fix.
+	 *
+	 * Everything this class writes onto the chunks is lost in LangChain's
+	 * aggregation, so the sink is the ONLY channel by which real cache figures
+	 * reach `tokensUsageParser`. If these break, every `_Stream` engine silently
+	 * goes back to reporting a 0% hit rate while caching normally.
+	 */
+	describe('streamUsageSink', () => {
+		async function* streamWithUsage(usage: Record<string, number>) {
+			yield { text: 'hi', message: { content: 'hi' } } as any;
+			yield {
+				text: '',
+				message: { content: '', response_metadata: { metadata: { usage } } },
+			} as any;
+		}
+
+		it('captures the cache figures Bedrock sent on the stream', async () => {
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				(() => streamWithUsage({ cacheReadInputTokens: 6889, cacheWriteInputTokens: 5006 })) as any,
+			);
+			const sink: StreamUsageSink = { last: null };
+			const model = makeModel({}, undefined, sink);
+
+			await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+
+			expect(sink.last).toEqual({ cacheReadInputTokens: 6889, cacheWriteInputTokens: 5006 });
+		});
+
+		it('accepts the snake_case spelling too', async () => {
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				(() =>
+					streamWithUsage({ cache_read_input_tokens: 120, cache_creation_input_tokens: 340 })) as any,
+			);
+			const sink: StreamUsageSink = { last: null };
+			const model = makeModel({}, undefined, sink);
+
+			await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+
+			expect(sink.last).toEqual({ cacheReadInputTokens: 120, cacheWriteInputTokens: 340 });
+		});
+
+		it('records an honest zero when the call cached nothing', async () => {
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				(() => streamWithUsage({ inputTokens: 10, outputTokens: 5 })) as any,
+			);
+			const sink: StreamUsageSink = { last: null };
+			const model = makeModel({}, undefined, sink);
+
+			await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+
+			// Written, not left null: the parser must see "this call cached nothing",
+			// not "no information", so a previous call can never be read as this one.
+			expect(sink.last).toEqual({ cacheReadInputTokens: 0, cacheWriteInputTokens: 0 });
+		});
+
+		it('leaves the sink untouched when no chunk carries usage at all', async () => {
+			async function* noUsage() {
+				yield { text: 'a', message: { content: 'a' } } as any;
+			}
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				noUsage as any,
+			);
+			const sink: StreamUsageSink = { last: null };
+			const model = makeModel({}, undefined, sink);
+
+			await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+
+			expect(sink.last).toBeNull();
+		});
+
+		it('streams normally when no sink is wired (back-compat)', async () => {
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				(() => streamWithUsage({ cacheReadInputTokens: 5, cacheWriteInputTokens: 0 })) as any,
+			);
+			const model = makeModel({});
+
+			const chunks = await collectChunks((model as any)._streamResponseChunks([], {}, undefined));
+
+			expect(chunks).toHaveLength(2);
+		});
+
+		it('the last call wins, so a stale value cannot survive into the next one', async () => {
+			const sink: StreamUsageSink = { last: null };
+
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				(() => streamWithUsage({ cacheReadInputTokens: 111, cacheWriteInputTokens: 222 })) as any,
+			);
+			const first = makeModel({}, undefined, sink);
+			await collectChunks((first as any)._streamResponseChunks([], {}, undefined));
+			expect(sink.last).toEqual({ cacheReadInputTokens: 111, cacheWriteInputTokens: 222 });
+
+			vi.spyOn(ChatBedrockConverse.prototype, '_streamResponseChunks').mockImplementation(
+				(() => streamWithUsage({ cacheReadInputTokens: 333, cacheWriteInputTokens: 444 })) as any,
+			);
+			const second = makeModel({}, undefined, sink);
+			await collectChunks((second as any)._streamResponseChunks([], {}, undefined));
+			expect(sink.last).toEqual({ cacheReadInputTokens: 333, cacheWriteInputTokens: 444 });
 		});
 	});
 

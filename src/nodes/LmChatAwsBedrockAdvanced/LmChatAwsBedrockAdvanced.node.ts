@@ -25,6 +25,8 @@ import {
 } from 'n8n-workflow';
 
 import { PatchedChatBedrockConverse } from './PatchedChatBedrockConverse';
+import type { StreamUsageSink } from './PatchedChatBedrockConverse';
+import { buildTokensUsage } from './buildTokensUsage';
 import { ChatAwsBedrockAdvancedStreaming } from '../LmChatAwsBedrockAdvancedStreaming/ChatAwsBedrockAdvancedStreaming';
 
 
@@ -599,6 +601,11 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 		//                      byte-identical to pre-0.9.0 Advanced behavior.
 		// Callback URL set   → streaming=true (forced in subclass) → streaming Converse API
 		//                      with side-channel POSTs to the callback during generation.
+		// #633: shared one-shot box between the streaming path and `tokensUsageParser`.
+		// Scoped to this supplyData call, so it is per-model-instance and never shared
+		// across executions.
+		const streamUsageSink: StreamUsageSink = { last: null };
+
 		const baseArgs = {
 			client,
 			model: modelName,
@@ -607,25 +614,24 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			maxTokens: options.maxTokensToSample,
 			patchOptions: options,
 			patchLogger: this.logger,
+			streamUsageSink,
 			// P1 patch: custom tokensUsageParser to preserve cache metrics.
-			// In non-streaming (streaming=false, _generate path): result.llmOutput.tokenUsage
-			//   carries completion/prompt/total/cacheRead/cacheWrite — populated by Patched._generate.
-			// In streaming (streaming=true, _streamResponseChunks path): LangChain builds
-			//   llmOutput.tokenUsage with ONLY completion/prompt/total from chunk.usage_metadata
-			//   (see @langchain/core chat_models.cjs L227-237); cache fields are dropped.
-			//   Patched._streamResponseChunks enriches chunk.response_metadata.tokenUsage
-			//   with cache fields — fall back to that path for cacheRead/cacheWrite.
+			// Non-streaming (_generate path): result.llmOutput.tokenUsage already carries
+			//   completion/prompt/total/cacheRead/cacheWrite — populated by Patched._generate.
+			// Streaming (_streamResponseChunks path): LangChain rebuilds llmOutput.tokenUsage
+			//   from the aggregated chunks with ONLY completion/prompt/total, reporting both
+			//   cache fields as literal 0, and hands us an empty `generations`. Nothing written
+			//   onto the chunks survives that far, so the figures travel out of band in
+			//   `streamUsageSink` instead. Merge rules live in buildTokensUsage (#633).
 			callbacks: [new N8nLlmTracing(this, {
 				tokensUsageParser: (result: any) => {
-					const tu = result?.llmOutput?.tokenUsage ?? {};
-					const streamTu = result?.generations?.[0]?.[0]?.message?.response_metadata?.tokenUsage ?? {};
-					return {
-						completionTokens: tu.completionTokens ?? 0,
-						promptTokens: tu.promptTokens ?? 0,
-						totalTokens: (tu.completionTokens ?? 0) + (tu.promptTokens ?? 0),
-						cacheReadInputTokens: tu.cacheReadInputTokens ?? streamTu.cacheReadInputTokens ?? 0,
-						cacheWriteInputTokens: tu.cacheWriteInputTokens ?? streamTu.cacheWriteInputTokens ?? 0,
-					};
+					// #633: the streaming path cannot report cache usage through `llmOutput`
+					// (LangChain zeroes both fields there and empties `generations`), so the
+					// figures Bedrock actually sent come in out of band via `streamUsageSink`.
+					// Drained on read, so a stale value can never be attributed to a later call.
+					const sunk = streamUsageSink.last;
+					streamUsageSink.last = null;
+					return buildTokensUsage(result?.llmOutput?.tokenUsage, sunk);
 				},
 			}) as any],
 			onFailedAttempt: makeN8nLlmFailedAttemptHandler(this),
