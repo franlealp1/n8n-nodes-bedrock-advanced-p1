@@ -16274,9 +16274,9 @@ function encode(_input) {
       continue;
     } else if (typeof input === "number") {
       if (Number.isInteger(input)) {
-        const nonNegative = input >= 0;
-        const major = nonNegative ? majorUint64 : majorNegativeInt64;
-        const value = nonNegative ? input : -input - 1;
+        const nonNegative2 = input >= 0;
+        const major = nonNegative2 ? majorUint64 : majorNegativeInt64;
+        const value = nonNegative2 ? input : -input - 1;
         if (value < 24) {
           data[cursor++] = major << 5 | value;
         } else if (value < 256) {
@@ -16302,9 +16302,9 @@ function encode(_input) {
       cursor += 8;
       continue;
     } else if (typeof input === "bigint") {
-      const nonNegative = input >= 0;
-      const major = nonNegative ? majorUint64 : majorNegativeInt64;
-      const value = nonNegative ? input : -input - BigInt(1);
+      const nonNegative2 = input >= 0;
+      const major = nonNegative2 ? majorUint64 : majorNegativeInt64;
+      const value = nonNegative2 ? input : -input - BigInt(1);
       const n5 = Number(value);
       if (n5 < 24) {
         data[cursor++] = major << 5 | n5;
@@ -16333,7 +16333,7 @@ function encode(_input) {
           b5 >>= BigInt(8);
         }
         ensureSpace(bigIntBytes.byteLength * 2);
-        data[cursor++] = nonNegative ? 194 : 195;
+        data[cursor++] = nonNegative2 ? 194 : 195;
         if (USE_BUFFER2) {
           encodeHeader(majorUnstructuredByteString, Buffer.byteLength(bigIntBytes));
         } else {
@@ -177425,54 +177425,7 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     super(fields);
     this.patchOptions = fields.patchOptions;
     this.patchLogger = fields.patchLogger ?? NOOP_LOGGER;
-    if (this.patchOptions.enableDebugLogs) this.installCommandProbe();
-  }
-  /**
-   * TEMPORARY diagnostic probe for issue #633 — REMOVE once the root cause is fixed.
-   *
-   * The engines whose Bedrock node runs in streaming mode report cacheRead = cacheWrite = 0,
-   * while their non-streaming twins cache at 52-76%. `injectCachePoints` demonstrably puts a
-   * cachePoint in the SystemMessage (verified in worker logs), and an isolated ConverseStream
-   * call against the same model/region does cache — so the loss happens somewhere between our
-   * message list and the command that reaches AWS.
-   *
-   * This wraps `client.send` to log the SHAPE of the outgoing command: which content blocks
-   * survive in `system`, `toolConfig.tools` and each message. It logs block *kinds* only —
-   * never the text — so no prompt content or PII reaches the logs.
-   *
-   * Behaviour is unchanged: the original `send` is always called, and any failure inside the
-   * probe is swallowed so diagnostics can never break inference.
-   */
-  installCommandProbe() {
-    const client2 = this.client;
-    if (!client2 || typeof client2.send !== "function" || client2.__p1CachePointProbe) return;
-    client2.__p1CachePointProbe = true;
-    const originalSend = client2.send.bind(client2);
-    const logger2 = this.patchLogger;
-    const shape = (blocks3) => {
-      if (!Array.isArray(blocks3)) return null;
-      return blocks3.map((b5) => {
-        if (b5 === null || typeof b5 !== "object") return typeof b5;
-        if ("cachePoint" in b5) return `cachePoint(${JSON.stringify(b5.cachePoint)})`;
-        return Object.keys(b5).join("+");
-      });
-    };
-    client2.send = (command, ...rest) => {
-      try {
-        const input = command?.input ?? {};
-        logger2.info(
-          "[BedrockAdvanced] [probe] " + JSON.stringify({
-            command: command?.constructor?.name,
-            system: shape(input.system),
-            tools: shape(input.toolConfig?.tools),
-            messages: Array.isArray(input.messages) ? input.messages.map((m5) => `${m5?.role}:[${(shape(m5?.content) ?? []).join(",")}]`) : null
-          })
-        );
-      } catch (e5) {
-        logger2.info("[BedrockAdvanced] [probe] failed: " + e5?.message);
-      }
-      return originalSend(command, ...rest);
-    };
+    this.streamUsageSink = fields.streamUsageSink;
   }
   invocationParams(invokeOptions) {
     const params = super.invocationParams(invokeOptions);
@@ -177576,15 +177529,16 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     for await (const chunk of stream) {
       const rawMeta = chunk.message?.response_metadata?.metadata?.usage;
       const rawDirect = chunk.message?.response_metadata?.usage;
-      if (this.patchOptions.enableDebugLogs && (rawMeta || rawDirect)) {
-        this.patchLogger.info(
-          "[BedrockAdvanced] [probe-usage] " + JSON.stringify({ rawMeta: rawMeta ?? null, rawDirect: rawDirect ?? null })
-        );
-      }
       if (rawMeta || rawDirect) {
         const rawUsage = rawMeta ?? rawDirect;
         const cacheRead = rawUsage.cacheReadInputTokens ?? rawUsage.cache_read_input_tokens ?? 0;
         const cacheWrite = rawUsage.cacheWriteInputTokens ?? rawUsage.cache_creation_input_tokens ?? 0;
+        if (this.streamUsageSink) {
+          this.streamUsageSink.last = {
+            cacheReadInputTokens: cacheRead,
+            cacheWriteInputTokens: cacheWrite
+          };
+        }
         const usageMeta = chunk.message.usage_metadata;
         const inputTokens = usageMeta?.input_tokens ?? rawUsage.inputTokens ?? rawUsage.input_tokens ?? 0;
         const outputTokens = usageMeta?.output_tokens ?? rawUsage.outputTokens ?? rawUsage.output_tokens ?? 0;
@@ -177632,6 +177586,31 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     };
   }
 };
+
+// src/nodes/LmChatAwsBedrockAdvanced/buildTokensUsage.ts
+function firstPositive(...values) {
+  for (const v8 of values) {
+    if (typeof v8 === "number" && Number.isFinite(v8) && v8 > 0) return v8;
+  }
+  return 0;
+}
+function nonNegative(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+function buildTokensUsage(tu, sunk) {
+  const completionTokens = nonNegative(tu?.completionTokens);
+  const promptTokens = nonNegative(tu?.promptTokens);
+  return {
+    completionTokens,
+    promptTokens,
+    // Deliberately prompt+completion, excluding cache tokens. That is what the
+    // non-streaming path has always reported and what the metrics pipeline is
+    // calibrated against; widening it here would silently reprice history.
+    totalTokens: completionTokens + promptTokens,
+    cacheReadInputTokens: firstPositive(tu?.cacheReadInputTokens, sunk?.cacheReadInputTokens),
+    cacheWriteInputTokens: firstPositive(tu?.cacheWriteInputTokens, sunk?.cacheWriteInputTokens)
+  };
+}
 
 // src/nodes/LmChatAwsBedrockAdvancedStreaming/streamCallback.ts
 var FINISH_REASONS = /* @__PURE__ */ new Set(["end_turn", "stop_sequence", "max_tokens"]);
@@ -178331,6 +178310,7 @@ var LmChatAwsBedrockAdvancedP1 = class {
       }
       client2 = new import_client_bedrock_runtime2.BedrockRuntimeClient(clientConfig);
     }
+    const streamUsageSink = { last: null };
     const baseArgs = {
       client: client2,
       model: modelName,
@@ -178339,25 +178319,20 @@ var LmChatAwsBedrockAdvancedP1 = class {
       maxTokens: options.maxTokensToSample,
       patchOptions: options,
       patchLogger: this.logger,
+      streamUsageSink,
       // P1 patch: custom tokensUsageParser to preserve cache metrics.
-      // In non-streaming (streaming=false, _generate path): result.llmOutput.tokenUsage
-      //   carries completion/prompt/total/cacheRead/cacheWrite — populated by Patched._generate.
-      // In streaming (streaming=true, _streamResponseChunks path): LangChain builds
-      //   llmOutput.tokenUsage with ONLY completion/prompt/total from chunk.usage_metadata
-      //   (see @langchain/core chat_models.cjs L227-237); cache fields are dropped.
-      //   Patched._streamResponseChunks enriches chunk.response_metadata.tokenUsage
-      //   with cache fields — fall back to that path for cacheRead/cacheWrite.
+      // Non-streaming (_generate path): result.llmOutput.tokenUsage already carries
+      //   completion/prompt/total/cacheRead/cacheWrite — populated by Patched._generate.
+      // Streaming (_streamResponseChunks path): LangChain rebuilds llmOutput.tokenUsage
+      //   from the aggregated chunks with ONLY completion/prompt/total, reporting both
+      //   cache fields as literal 0, and hands us an empty `generations`. Nothing written
+      //   onto the chunks survives that far, so the figures travel out of band in
+      //   `streamUsageSink` instead. Merge rules live in buildTokensUsage (#633).
       callbacks: [new import_ai_utilities.N8nLlmTracing(this, {
         tokensUsageParser: (result) => {
-          const tu = result?.llmOutput?.tokenUsage ?? {};
-          const streamTu = result?.generations?.[0]?.[0]?.message?.response_metadata?.tokenUsage ?? {};
-          return {
-            completionTokens: tu.completionTokens ?? 0,
-            promptTokens: tu.promptTokens ?? 0,
-            totalTokens: (tu.completionTokens ?? 0) + (tu.promptTokens ?? 0),
-            cacheReadInputTokens: tu.cacheReadInputTokens ?? streamTu.cacheReadInputTokens ?? 0,
-            cacheWriteInputTokens: tu.cacheWriteInputTokens ?? streamTu.cacheWriteInputTokens ?? 0
-          };
+          const sunk = streamUsageSink.last;
+          streamUsageSink.last = null;
+          return buildTokensUsage(result?.llmOutput?.tokenUsage, sunk);
         }
       })],
       onFailedAttempt: (0, import_ai_utilities.makeN8nLlmFailedAttemptHandler)(this)

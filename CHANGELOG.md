@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.10.0-alpha.8 (2026-08-23)
+
+### Fix: streaming lost the prompt-cache figures, reporting a 0% hit rate (#633)
+
+Every engine whose Bedrock node runs in streaming mode (`Experto_Stream`,
+`Copiloto_Stream`, `Planner_Stream`) reported `cacheRead = cacheWrite = 0` in
+`posthoc_agent_metrics`, while their non-streaming twins reported 52-76%. The
+caching itself was fine all along — Bedrock was caching normally and billing
+accordingly. What was broken was the reporting, so cost reports covering those
+engines were skewed HIGH.
+
+Measured on noprod (worker-2, exec 1161358, `Copiloto_Stream`), same call:
+
+```
+Bedrock sent   cacheReadInputTokens=6889 cacheWriteInputTokens=5006
+the node wrote cacheRead=0 cacheWrite=0
+```
+
+Root cause, in two parts:
+
+1. `llmOutput.tokenUsage` reports both cache fields as literal `0` on the
+   streaming path (LangChain rebuilds it from the aggregated chunks with only
+   completion/prompt/total). A `??` chain accepts `0` as a real value and never
+   falls through — a genuine 0 and a lost 0 are indistinguishable there.
+2. The existing fallback read `generations[0][0].message.response_metadata`,
+   but `generations` arrives **empty** at `tokensUsageParser`, so everything
+   `_streamResponseChunks` writes onto the chunks is already gone.
+
+Fix: the streaming path deposits the figures Bedrock actually sent into a
+one-shot `StreamUsageSink`, and the new pure `buildTokensUsage()` merges them
+with "first POSITIVE wins" instead of "first defined wins". The sink is drained
+on read, so a stale value can never be attributed to a later call.
+
+Unchanged on purpose:
+
+- **Non-streaming path**: `llmOutput` still wins whenever it holds a real
+  figure. Verified in situ — `cacheWrite 2294` → `cacheRead 2294` across an
+  agent loop, identical before and after.
+- **`totalTokens`** stays `prompt + completion`, excluding cache tokens. That
+  is what the non-streaming path has always reported and what the metrics
+  pipeline is calibrated against; widening it would silently reprice history.
+
+Also confirmed along the way, from Bedrock's `cacheDetails`: the effective TTL
+is **5 minutes**, not the `cacheTtl: '1h'` all seven engines declare — Claude
+Sonnet 4.6 has no 1-hour option on Bedrock. Tracked separately.
+
+116 tests (20 new). Both halves are verified to fail when the fix is reverted.
+
 ## 0.10.0-alpha.2 (2026-05-07)
 
 ### Feat: Token usage on `agent-finish` and `tool-call-start` events
