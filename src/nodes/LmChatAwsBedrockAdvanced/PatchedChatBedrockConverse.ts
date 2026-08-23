@@ -60,6 +60,61 @@ export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 		super(fields);
 		this.patchOptions = fields.patchOptions;
 		this.patchLogger = fields.patchLogger ?? NOOP_LOGGER;
+		if (this.patchOptions.enableDebugLogs) this.installCommandProbe();
+	}
+
+	/**
+	 * TEMPORARY diagnostic probe for issue #633 — REMOVE once the root cause is fixed.
+	 *
+	 * The engines whose Bedrock node runs in streaming mode report cacheRead = cacheWrite = 0,
+	 * while their non-streaming twins cache at 52-76%. `injectCachePoints` demonstrably puts a
+	 * cachePoint in the SystemMessage (verified in worker logs), and an isolated ConverseStream
+	 * call against the same model/region does cache — so the loss happens somewhere between our
+	 * message list and the command that reaches AWS.
+	 *
+	 * This wraps `client.send` to log the SHAPE of the outgoing command: which content blocks
+	 * survive in `system`, `toolConfig.tools` and each message. It logs block *kinds* only —
+	 * never the text — so no prompt content or PII reaches the logs.
+	 *
+	 * Behaviour is unchanged: the original `send` is always called, and any failure inside the
+	 * probe is swallowed so diagnostics can never break inference.
+	 */
+	private installCommandProbe(): void {
+		const client = (this as any).client;
+		if (!client || typeof client.send !== 'function' || client.__p1CachePointProbe) return;
+		client.__p1CachePointProbe = true;
+
+		const originalSend = client.send.bind(client);
+		const logger = this.patchLogger;
+
+		const shape = (blocks: any): string[] | null => {
+			if (!Array.isArray(blocks)) return null;
+			return blocks.map((b) => {
+				if (b === null || typeof b !== 'object') return typeof b;
+				if ('cachePoint' in b) return `cachePoint(${JSON.stringify(b.cachePoint)})`;
+				return Object.keys(b).join('+');
+			});
+		};
+
+		client.send = (command: any, ...rest: any[]) => {
+			try {
+				const input = command?.input ?? {};
+				logger.info(
+					'[BedrockAdvanced] [probe] ' +
+						JSON.stringify({
+							command: command?.constructor?.name,
+							system: shape(input.system),
+							tools: shape(input.toolConfig?.tools),
+							messages: Array.isArray(input.messages)
+								? input.messages.map((m: any) => `${m?.role}:[${(shape(m?.content) ?? []).join(',')}]`)
+								: null,
+						}),
+				);
+			} catch (e: any) {
+				logger.info('[BedrockAdvanced] [probe] failed: ' + e?.message);
+			}
+			return originalSend(command, ...rest);
+		};
 	}
 
 	invocationParams(invokeOptions?: any): any {
@@ -203,6 +258,16 @@ export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 			// if this patch already ran (guard against double-patching).
 			const rawMeta = (chunk.message as any)?.response_metadata?.metadata?.usage;
 			const rawDirect = chunk.message?.response_metadata?.usage;
+			// TEMPORARY probe for #633 — REMOVE with installCommandProbe().
+			// Logs the usage EXACTLY as Bedrock delivered it on the stream, before any of our
+			// normalisation. This is the number that settles whether streaming actually caches
+			// (a reporting bug) or genuinely does not (a cost bug). Numbers only, no content.
+			if (this.patchOptions.enableDebugLogs && (rawMeta || rawDirect)) {
+				this.patchLogger.info(
+					'[BedrockAdvanced] [probe-usage] ' +
+						JSON.stringify({ rawMeta: rawMeta ?? null, rawDirect: rawDirect ?? null }),
+				);
+			}
 			if (rawMeta || rawDirect) {
 				// camelCase (rawMeta from Bedrock) or snake_case (rawDirect already patched)
 				const rawUsage = rawMeta ?? rawDirect;

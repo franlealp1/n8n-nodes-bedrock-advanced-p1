@@ -177425,6 +177425,54 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     super(fields);
     this.patchOptions = fields.patchOptions;
     this.patchLogger = fields.patchLogger ?? NOOP_LOGGER;
+    if (this.patchOptions.enableDebugLogs) this.installCommandProbe();
+  }
+  /**
+   * TEMPORARY diagnostic probe for issue #633 — REMOVE once the root cause is fixed.
+   *
+   * The engines whose Bedrock node runs in streaming mode report cacheRead = cacheWrite = 0,
+   * while their non-streaming twins cache at 52-76%. `injectCachePoints` demonstrably puts a
+   * cachePoint in the SystemMessage (verified in worker logs), and an isolated ConverseStream
+   * call against the same model/region does cache — so the loss happens somewhere between our
+   * message list and the command that reaches AWS.
+   *
+   * This wraps `client.send` to log the SHAPE of the outgoing command: which content blocks
+   * survive in `system`, `toolConfig.tools` and each message. It logs block *kinds* only —
+   * never the text — so no prompt content or PII reaches the logs.
+   *
+   * Behaviour is unchanged: the original `send` is always called, and any failure inside the
+   * probe is swallowed so diagnostics can never break inference.
+   */
+  installCommandProbe() {
+    const client2 = this.client;
+    if (!client2 || typeof client2.send !== "function" || client2.__p1CachePointProbe) return;
+    client2.__p1CachePointProbe = true;
+    const originalSend = client2.send.bind(client2);
+    const logger2 = this.patchLogger;
+    const shape = (blocks3) => {
+      if (!Array.isArray(blocks3)) return null;
+      return blocks3.map((b5) => {
+        if (b5 === null || typeof b5 !== "object") return typeof b5;
+        if ("cachePoint" in b5) return `cachePoint(${JSON.stringify(b5.cachePoint)})`;
+        return Object.keys(b5).join("+");
+      });
+    };
+    client2.send = (command, ...rest) => {
+      try {
+        const input = command?.input ?? {};
+        logger2.info(
+          "[BedrockAdvanced] [probe] " + JSON.stringify({
+            command: command?.constructor?.name,
+            system: shape(input.system),
+            tools: shape(input.toolConfig?.tools),
+            messages: Array.isArray(input.messages) ? input.messages.map((m5) => `${m5?.role}:[${(shape(m5?.content) ?? []).join(",")}]`) : null
+          })
+        );
+      } catch (e5) {
+        logger2.info("[BedrockAdvanced] [probe] failed: " + e5?.message);
+      }
+      return originalSend(command, ...rest);
+    };
   }
   invocationParams(invokeOptions) {
     const params = super.invocationParams(invokeOptions);
@@ -177528,6 +177576,11 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     for await (const chunk of stream) {
       const rawMeta = chunk.message?.response_metadata?.metadata?.usage;
       const rawDirect = chunk.message?.response_metadata?.usage;
+      if (this.patchOptions.enableDebugLogs && (rawMeta || rawDirect)) {
+        this.patchLogger.info(
+          "[BedrockAdvanced] [probe-usage] " + JSON.stringify({ rawMeta: rawMeta ?? null, rawDirect: rawDirect ?? null })
+        );
+      }
       if (rawMeta || rawDirect) {
         const rawUsage = rawMeta ?? rawDirect;
         const cacheRead = rawUsage.cacheReadInputTokens ?? rawUsage.cache_read_input_tokens ?? 0;
