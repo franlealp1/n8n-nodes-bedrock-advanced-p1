@@ -15,6 +15,14 @@
  * generator continues. This is intentional — if the callback is unreachable the user's final
  * message still arrives through the normal /webhook/sendMessage path; streaming UX degrades
  * gracefully.
+ *
+ * TWO CHANNELS, TWO GUARANTEES (flock#1060). `delta` POSTs are best-effort: high frequency,
+ * unordered, fire-and-forget, no retry — they exist to paint the live bubble, where losing a
+ * fragment is a cosmetic blip. The semantic events are the durable ones: each carries the
+ * round's FULL text (`agent-finish.text` for the last round, `tool-call-start.text` for every
+ * earlier one), so a consumer can always rebuild the turn without depending on every single
+ * delta having arrived. A consumer that reconstructs persisted text by concatenating deltas is
+ * using the wrong channel — that is precisely the bug flock#1060 fixed downstream.
  */
 
 import type { ChatGenerationChunk } from '@langchain/core/outputs';
@@ -59,6 +67,22 @@ export type CallbackEvent =
 			streamId?: string;
 			seq: number;
 			tools: Array<{ name: string; args: unknown; id: string }>;
+			/**
+			 * Canonical text of the round that is closing — the same `aggregatedText`
+			 * that `agent-finish` sends for the LAST round (flock#1060).
+			 *
+			 * WHY IT IS HERE. One session = one round, and a turn with tools has as many
+			 * rounds as tool calls plus one. Until now only the last round had a canonical
+			 * text: every earlier round survived solely as the sum of its `delta` POSTs,
+			 * which are fire-and-forget and unordered. One lost POST and the consumer's
+			 * reconstruction silently lost that fragment forever — measured in noprod on
+			 * 2026-09-07, a message persisted as "Buscando planes existentes que enc".
+			 *
+			 * Always a string (empty when the round produced no text before calling the
+			 * tool), so a consumer can tell "this fork does not send it" (undefined) from
+			 * "this round said nothing" ('').
+			 */
+			text: string;
 			usage?: UsageData;
 			agentName?: string;
 			color?: string;
@@ -171,6 +195,22 @@ export function createStreamCallback(config: StreamCallbackConfig): StreamCallba
 
 		// Fire-and-forget. Do NOT await — we must not block the generator on network I/O.
 		fetchImpl(url, { method: 'POST', headers, body: JSON.stringify(body) })
+			.then((res) => {
+				// `fetch` only REJECTS on network failure: a 401, 500 or 502 resolves like a
+				// success, so until now a POST the backend refused was indistinguishable from
+				// one it accepted — nothing logged, on either side.
+				//
+				// That blind spot got expensive with flock#1060: a semantic event now carries
+				// the whole text of its round, so losing ONE of them silently drops a whole
+				// paragraph from the persisted message (a lost `delta` only chips a fragment).
+				// We still do not retry — that would need de-duplication downstream — but a
+				// refused POST must at least be visible in the worker log.
+				if (res && res.ok === false) {
+					logger?.error?.(
+						`[streamCallback] POST rejected: streamId=${sessionId} seq=${body.seq} type=${body.type} status=${res.status}`,
+					);
+				}
+			})
 			.catch((err: unknown) => {
 				logger?.error?.(
 					`[streamCallback] POST failed: streamId=${sessionId} seq=${body.seq} type=${body.type} err=${String(err)}`,
@@ -187,7 +227,13 @@ export function createStreamCallback(config: StreamCallbackConfig): StreamCallba
 		tools: Array<{ name: string; args: unknown; id: string }>,
 		usage?: UsageData,
 	): void {
-		const extra: Record<string, unknown> = { type: 'tool-call-start' as const, tools };
+		// `text` viaja SIEMPRE (aunque sea ''), por simetría con agent-finish: es el texto
+		// canónico de esta ronda, y el único inmune a que se pierda un POST de delta.
+		const extra: Record<string, unknown> = {
+			type: 'tool-call-start' as const,
+			tools,
+			text: aggregatedText,
+		};
 		if (usage) extra.usage = usage;
 		const body = buildEnvelope(extra) as CallbackEvent;
 		sendPost(agentEventUrl, body);

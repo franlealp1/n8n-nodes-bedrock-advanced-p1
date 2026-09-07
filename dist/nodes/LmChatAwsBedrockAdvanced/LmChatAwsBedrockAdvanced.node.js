@@ -175929,7 +175929,11 @@ function createStreamCallback(config2) {
     sendPost(deltaUrl, body);
   }
   function postToolCallStart(tools, usage) {
-    const extra = { type: "tool-call-start", tools };
+    const extra = {
+      type: "tool-call-start",
+      tools,
+      text: aggregatedText
+    };
     if (usage) extra.usage = usage;
     const body = buildEnvelope(extra);
     sendPost(agentEventUrl, body);

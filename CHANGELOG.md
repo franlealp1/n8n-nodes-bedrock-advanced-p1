@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.10.0-alpha.9 (2026-09-07)
+
+### Feature: `tool-call-start` now carries the canonical text of its round (flock#1060)
+
+A turn that uses tools is not one generation, it is several: LangChain calls the
+generator once per round, and the node creates a fresh `streamCallback` session
+each time — so `seq` and `aggregatedText` restart from zero on every round.
+
+Until now only the LAST round shipped a canonical text (`agent-finish.text`).
+Every earlier round existed downstream **only** as the sum of its `delta` POSTs,
+which are fire-and-forget, unordered and never retried. Losing one of those POSTs
+therefore removed text from the consumer's reconstruction with no way to notice,
+and — because the backend persists that reconstruction — the loss was permanent.
+
+Measured in Flock's noprod on 2026-09-07: the POST carrying `seq 2` never arrived,
+the consumer's buffer skipped the hole after its 1200 ms tolerance, and the message
+was stored as `Buscando planes existentes que enc` — cut mid-word. 2 such gaps in
+4 streaming turns on that container.
+
+The fix is one field, and it restores a symmetry that was missing by accident
+rather than by design: `postToolCallStart` already had `aggregatedText` in scope.
+
+```diff
+ function postToolCallStart(tools, usage) {
+-  const extra = { type: 'tool-call-start', tools };
++  const extra = { type: 'tool-call-start', tools, text: aggregatedText };
+```
+
+`text` is **always** present (empty string when the round called the tool without
+saying anything), so a consumer can distinguish "this node does not send it"
+(`undefined`, older versions) from "this round produced no text" (`''`).
+
+Contract, now explicit in the module header: **deltas are best-effort and only
+feed the live render; every durable text travels in a semantic event** —
+`agent-finish.text` for the last round, `tool-call-start.text` for the rest. A
+consumer rebuilding persisted text by concatenating deltas is using the wrong
+channel.
+
+Unchanged on purpose:
+
+- **No-callback path**: untouched, still allocates nothing and emits nothing.
+- **Number, order and `seq` of the POSTs**: identical. The event grows by one
+  field; nothing new is sent, and nothing is sent twice.
+- **Failure semantics**: still fire-and-forget. Note that `fetch` does not reject
+  on 4xx/5xx, so a rejected POST stays invisible — worth revisiting now that the
+  semantic events carry the durable text.
+
+Backwards compatible in both directions: an older consumer ignores the field; a
+newer consumer falls back to its delta accumulation when the field is absent.
+
 ## 0.10.0-alpha.8 (2026-08-23)
 
 ### Fix: streaming lost the prompt-cache figures, reporting a 0% hit rate (#633)

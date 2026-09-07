@@ -166,6 +166,42 @@ describe('createStreamCallback', () => {
 		expect(calls.map((c) => c.body.seq)).toEqual([0, 1, 2]);
 	});
 
+	// flock#1060 — un POST que el backend RECHAZA no lo ve `.catch`: `fetch` solo rechaza
+	// por fallo de red. Con el texto canónico viajando en los eventos semánticos, perder
+	// uno cuesta una ronda entera del mensaje, así que como mínimo tiene que verse en el log.
+
+	it('un POST rechazado por el backend (5xx) se registra, aunque fetch no rechace', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch(
+			async () => new Response('nope', { status: 502, statusText: 'Bad Gateway' }),
+		);
+		const { logger, error } = makeLogger();
+		const session = createStreamCallback(baseCfg({ fetchImpl, logger }));
+
+		session.processChunk(chunkToolStart(0, 'doX', 'tu_1'));
+		session.processChunk(chunkToolDelta(0, '{}'));
+		session.processChunk(chunkMessageStop('tool_use'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(calls.length).toBeGreaterThan(0); // se intentó enviar
+		expect(error.some((m) => m.includes('POST rejected') && m.includes('502'))).toBe(true);
+		expect(error.some((m) => m.includes('tool-call-start'))).toBe(true);
+	});
+
+	it('un 2xx no ensucia el log con falsos rechazos', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl } = makeFakeFetch();
+		const { logger, error } = makeLogger();
+		const session = createStreamCallback(baseCfg({ fetchImpl, logger }));
+
+		session.processChunk(chunkWithText('todo bien'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(error).toEqual([]);
+	});
+
 	it('fetch rejection does not throw out of processChunk', async () => {
 		vi.useFakeTimers();
 		const { fetchImpl, calls } = makeFakeFetch(() => Promise.reject(new Error('boom')));
@@ -281,6 +317,71 @@ describe('createStreamCallback', () => {
 		expect(toolCall!.body.tools).toEqual([
 			{ name: 'searchEmail', id: 'tooluse_abc', args: { q: 'plan' } },
 		]);
+	});
+
+	// flock#1060 — a round that ends in a tool call must ship its own canonical text.
+	// Until 0.10.0-alpha.9 only the LAST round did (agent-finish.text); every earlier round
+	// survived only as the sum of its delta POSTs, which are fire-and-forget. One lost POST
+	// and the consumer's persisted text lost that fragment for good.
+
+	it('tool-call-start carries the round text, complete, even if its deltas never reached the wire', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch();
+		const session = createStreamCallback(baseCfg({ fetchImpl }));
+
+		session.processChunk(chunkWithText('Buscando planes '));
+		session.processChunk(chunkWithText('existentes que '));
+		session.processChunk(chunkWithText('encajen...'));
+		session.processChunk(chunkToolStart(0, 'buscarPlan', 'tu_1'));
+		session.processChunk(chunkToolDelta(0, '{}'));
+		session.processChunk(chunkMessageStop('tool_use'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+
+		const toolCall = calls.find((c) => c.body.type === 'tool-call-start');
+		// El texto va ENTERO en el evento, con independencia de en cuántos POST de delta
+		// se troceó ni de cuántos de ellos llegaron.
+		expect(toolCall!.body.text).toBe('Buscando planes existentes que encajen...');
+	});
+
+	it('tool-call-start sends text:"" (not undefined) when the round called the tool without saying anything', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch();
+		const session = createStreamCallback(baseCfg({ fetchImpl }));
+		session.processChunk(chunkToolStart(0, 'doX', 'tu_1'));
+		session.processChunk(chunkToolDelta(0, '{}'));
+		session.processChunk(chunkMessageStop('tool_use'));
+		await session.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+
+		const toolCall = calls.find((c) => c.body.type === 'tool-call-start');
+		// Distinguible de un fork viejo (que no manda el campo): '' es "no dijo nada",
+		// undefined sería "no sé". El consumidor decide con typeof, no con truthiness.
+		expect(toolCall!.body.text).toBe('');
+		expect(Object.prototype.hasOwnProperty.call(toolCall!.body, 'text')).toBe(true);
+	});
+
+	it('the canonical text of a round covers ONLY that round: it does not carry over to the next', async () => {
+		vi.useFakeTimers();
+		const { fetchImpl, calls } = makeFakeFetch();
+
+		// Ronda 1 — texto y tool.
+		const round1 = createStreamCallback(baseCfg({ fetchImpl }));
+		round1.processChunk(chunkWithText('primera ronda'));
+		round1.processChunk(chunkToolStart(0, 'doX', 'tu_1'));
+		round1.processChunk(chunkToolDelta(0, '{}'));
+		round1.processChunk(chunkMessageStop('tool_use'));
+		await round1.flushFinal();
+
+		// Ronda 2 — sesión NUEVA (el fork crea una por ronda), texto propio y cierre.
+		const round2 = createStreamCallback(baseCfg({ fetchImpl }));
+		round2.processChunk(chunkWithText('segunda ronda'));
+		round2.processChunk(chunkMessageStop('end_turn'));
+		await round2.flushFinal();
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(calls.find((c) => c.body.type === 'tool-call-start')!.body.text).toBe('primera ronda');
+		expect(calls.find((c) => c.body.type === 'agent-finish')!.body.text).toBe('segunda ronda');
 	});
 
 	it('flushFinal with stopReason="tool_use" emits POST to {url}/agent-event', async () => {
