@@ -22,6 +22,7 @@
 import { ChatBedrockConverse, type ChatBedrockConverseInput } from '@langchain/aws';
 
 import { injectCachePoints } from './injectCachePoints';
+import { registerToolResultCachePoint } from './toolResultCachePoint';
 
 export interface PatchOptions {
 	temperature?: number;
@@ -30,6 +31,8 @@ export interface PatchOptions {
 	cacheSystemPrompt?: boolean;
 	cacheTools?: boolean;
 	cacheConversationHistory?: boolean;
+	/** flock#1575: cache point after the last tool result of the request. Needs enablePromptCaching. */
+	cacheToolResults?: boolean;
 	cacheTtl?: string;
 	systemPromptBlocks?: string | string[];
 	enableDebugLogs?: boolean;
@@ -90,6 +93,15 @@ export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 		this.patchOptions = fields.patchOptions;
 		this.patchLogger = fields.patchLogger ?? NOOP_LOGGER;
 		this.streamUsageSink = fields.streamUsageSink;
+
+		// flock#1575: on `this.client` (LangChain builds one when `fields.client` is absent).
+		// With the option off nothing is registered, so the request is byte-identical to before.
+		if (this.patchOptions.enablePromptCaching && this.patchOptions.cacheToolResults) {
+			registerToolResultCachePoint(this.client, this.patchLogger, {
+				debug: !!this.patchOptions.enableDebugLogs,
+				label: this.model,
+			});
+		}
 	}
 
 	invocationParams(invokeOptions?: any): any {

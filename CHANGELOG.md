@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.10.0-alpha.10 (2026-10-12)
+
+### Feature: `cacheToolResults` — in-turn caching of tool results (flock#1575, technique 3 of flock#1571)
+
+In an agent turn every model call re-sends the tool results gathered so far, and
+they sit **after** the last cache point (the history point skips tool messages on
+purpose). They were billed as full-price input on every round: in Flock's PROD
+execution 280727 a ~423k-token tool result was paid 7 times (10.78 $ for one turn).
+
+New option **Cache Tool Results** (`cacheToolResults`, off by default, requires
+Enable Prompt Caching). When on, an AWS SDK middleware (step `initialize`) appends
+ONE `{ cachePoint: { type: 'default' } }` as a **sibling** after the last
+`toolResult` of the request's last user message, so the next call of the turn
+reads everything before it from cache and only writes what is new.
+
+- **Sibling, never inside `toolResult`**: `cachePoint` is a member of
+  `ContentBlock`, not of `ToolResultContentBlock`. In `@langchain/aws` 0.1.15 a
+  cache point on a ToolMessage ends up inside `toolResult.content`, hence the
+  middleware on the converted request instead.
+- **One hook for both routes**: Converse and ConverseStream both go through
+  `client.send`; other commands on the client are left untouched.
+- **Never more than 4 cache points** (Bedrock rejects 5:
+  `A maximum of 4 blocks with cache_control may be provided. Found 5.`). With
+  2 System Prompt Blocks + tools + history (Flock's Builder/Onboarding) there is
+  no room: the point is not added and a warning is logged once per model instance.
+- **Never breaks a request**: any unexpected shape or error sends the original
+  request and warns once per instance. Diagnostics are best-effort.
+- **Never silent**: without debug logs, one `info` the first time it works
+  (`… [toolResultCache] [<model>] active: …`) and one `warn` per anomaly kind.
+  With **Enable Debug Logs**, one line per call with the decision, the number of
+  cache points and a short hash per message (never content), to check that each
+  call's prefix is byte-identical to the previous one on the real request.
+- **Off = unchanged**: nothing is registered on the client; the HTTP body is
+  byte for byte the 0.10.0-alpha.9 one (golden test against a fixture generated
+  from that commit).
+
+Measured against Bedrock before writing the code (noprod,
+`eu.anthropic.claude-sonnet-4-6`, synthetic data): with this placement every call
+read exactly `cacheRead + cacheWrite` of the previous one and uncached input
+dropped to 1 token per call; same with 3 and 11 parallel tools; moving the point
+between calls does not break the cached prefix.
+
+### Also in this release
+
+- **`streamCallback` logs rejected POSTs** (`res.ok === false` → `logger.error`
+  with streamId/seq/type/status). It was already on `main` at 0.10.0-alpha.9 but
+  **not** in the alpha.9 tarball that was deployed (the deployed bundle predates
+  it). No change to requests sent to Bedrock.
+- `package-lock.json` is now versioned (it was in `.gitignore`), so a tarball can
+  be rebuilt with exactly the dependencies of the previous one; `.env` is ignored.
+
 ## 0.10.0-alpha.9 (2026-09-07)
 
 ### Feature: `tool-call-start` now carries the canonical text of its round (flock#1060)

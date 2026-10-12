@@ -95,6 +95,21 @@ changes.
 
 Full contract: `docDevsPeople1/planesClaude/CACHING_REFACTOR_CONTRACT.md` §5.
 
+## Cache Tool Results (v0.10.0-alpha.10+)
+
+Option **Cache Tool Results** (`cacheToolResults`, off by default; shown when
+Enable Prompt Caching is on). Adds one cache point right after the last tool
+result of each request, so the next call of the same agent turn reads every
+previous tool result from cache (0.1×) instead of paying it again as input.
+
+- Pays off when a turn makes **2 or more model calls after a tool**; with a single
+  call after the tool, that increment costs 25 % more (cache write).
+- Bedrock allows **4 cache points per request**. If the request already has 4
+  (e.g. 2 System Prompt Blocks + tools + history), the point is not added and a
+  warning is logged once per execution.
+- Look for `[toolResultCache]` in the worker logs: `active` the first time it
+  adds a point; warnings explain why it did nothing.
+
 ## Installation
 
 ### On the N8N server (admin only)

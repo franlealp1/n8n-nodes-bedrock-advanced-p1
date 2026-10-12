@@ -175665,6 +175665,145 @@ function injectCachePoints(messages, options, logger2) {
   });
 }
 
+// src/nodes/LmChatAwsBedrockAdvanced/toolResultCachePoint.ts
+var import_node_crypto8 = require("node:crypto");
+var TOOL_RESULT_CACHE_POINT_MIDDLEWARE = "flockToolResultCachePoint";
+var CONVERSE_COMMANDS = /* @__PURE__ */ new Set(["ConverseCommand", "ConverseStreamCommand"]);
+var LOG_PREFIX = "[BedrockAdvanced] [toolResultCache]";
+var isCachePoint = (block) => typeof block === "object" && block !== null && "cachePoint" in block;
+var countIn = (blocks3) => Array.isArray(blocks3) ? blocks3.filter(isCachePoint).length : 0;
+function countCachePoints(input) {
+  if (!input || typeof input !== "object") return 0;
+  let n5 = countIn(input.system) + countIn(input.toolConfig?.tools);
+  if (Array.isArray(input.messages)) {
+    for (const m5 of input.messages) n5 += countIn(m5?.content);
+  }
+  return n5;
+}
+function planToolResultCachePoint(input) {
+  const messages = input?.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return { action: "skip", reason: "bad-shape" };
+  const last = messages[messages.length - 1];
+  if (!last || typeof last !== "object" || !Array.isArray(last.content)) return { action: "skip", reason: "bad-shape" };
+  if (last.role !== "user") return { action: "skip", reason: "last-not-user" };
+  if (!last.content.some((b5) => b5 && typeof b5 === "object" && "toolResult" in b5)) {
+    return { action: "skip", reason: "no-toolResult" };
+  }
+  if (last.content.some(isCachePoint)) return { action: "skip", reason: "already-has-cachepoint" };
+  const points = countCachePoints(input);
+  if (points + 1 > MAX_CACHEPOINTS) return { action: "skip", reason: "budget", points };
+  const newLast = { ...last, content: [...last.content, { cachePoint: { type: "default" } }] };
+  return { action: "add", input: { ...input, messages: [...messages.slice(0, -1), newLast] }, points: points + 1 };
+}
+var hashReplacer = (_key, value) => {
+  if (value instanceof Uint8Array) return `<bytes:${value.length}>`;
+  if (value && value.type === "Buffer" && Array.isArray(value.data)) return `<bytes:${value.data.length}>`;
+  return value;
+};
+var shortHash = (value) => (0, import_node_crypto8.createHash)("sha256").update(JSON.stringify(value, hashReplacer) ?? "").digest("hex").slice(0, 10);
+function describeShape(input) {
+  const messages = input?.messages;
+  const last = Array.isArray(messages) ? messages[messages.length - 1] : void 0;
+  const lastContent = last?.content;
+  return `keys=[${input && typeof input === "object" ? Object.keys(input).join(",") : typeof input}] messages=${Array.isArray(messages) ? messages.length : typeof messages} lastRole=${last?.role} lastContent=${Array.isArray(lastContent) ? `array(${lastContent.length})` : typeof lastContent}`;
+}
+function describeError(err) {
+  const e5 = err;
+  const where = typeof e5?.stack === "string" ? e5.stack.split("\n")[1]?.trim() : void 0;
+  return `${e5?.name ?? "Error"}: ${e5?.message ?? String(err)}${where ? ` (${where})` : ""}`;
+}
+var hasToolResult = (message) => Array.isArray(message?.content) && message.content.some((b5) => b5 && typeof b5 === "object" && "toolResult" in b5);
+function createToolResultCachePointMiddleware(logger2, opts) {
+  const tag2 = `${LOG_PREFIX}${opts.label ? ` [${opts.label}]` : ""}`;
+  const said = /* @__PURE__ */ new Set();
+  const once = (key, emit) => {
+    if (said.has(key)) return;
+    said.add(key);
+    emit();
+  };
+  const report = (plan, commandName, input) => {
+    if (plan.action === "add") {
+      once(
+        "active",
+        () => logger2.info(`${tag2} active: cache point added after the tool results (${plan.points} cache points in the request).`)
+      );
+    } else if (plan.reason === "budget") {
+      once(
+        "budget",
+        () => logger2.warn(
+          `${tag2} not added: the request already has ${plan.points} cache points and Bedrock allows ${MAX_CACHEPOINTS}. Typical cause: 2 systemPromptBlocks + tools + history (Builder/Onboarding). Warned once per model instance.`
+        )
+      );
+    } else if (plan.reason === "bad-shape") {
+      once(
+        "bad-shape",
+        () => logger2.warn(`${tag2} ${commandName}: unexpected request shape, nothing added (warned once): ${describeShape(input)}`)
+      );
+    } else if (plan.reason === "no-toolResult" && Array.isArray(input?.messages) && input.messages.slice(0, -1).some(hasToolResult)) {
+      once(
+        "tool-results-not-last",
+        () => logger2.warn(
+          `${tag2} ${commandName}: the request has tool results but its last message does not, so nothing was cached (something is appended after the tool messages; warned once): ${describeShape(input)}`
+        )
+      );
+    }
+    if (opts.debug) {
+      const sent = plan.action === "add" ? plan.input : input;
+      const hashes = Array.isArray(sent?.messages) ? sent.messages.map(shortHash) : [];
+      logger2.info(
+        `${tag2} ${commandName} decision=${plan.action === "add" ? "add" : `skip:${plan.reason}`} points=${countCachePoints(sent)} msgHashes=[${hashes.join(",")}]`
+      );
+    }
+  };
+  return (next, context) => async (args) => {
+    const commandName = context?.commandName;
+    if (!CONVERSE_COMMANDS.has(commandName ?? "")) {
+      if (commandName === void 0) {
+        once(
+          "no-command",
+          () => logger2.warn(`${tag2} middleware context has no commandName: request sent unchanged, nothing cached (warned once).`)
+        );
+      }
+      return next(args);
+    }
+    let plan;
+    try {
+      plan = planToolResultCachePoint(args.input);
+    } catch (err) {
+      once(
+        "error",
+        () => logger2.warn(
+          `${tag2} ${commandName}: unexpected error, request sent unchanged and nothing cached for it (further errors in this instance are not logged): ${describeError(err)}`
+        )
+      );
+      return next(args);
+    }
+    try {
+      report(plan, commandName, args.input);
+    } catch {
+    }
+    return plan.action === "add" ? next({ ...args, input: plan.input }) : next(args);
+  };
+}
+function registerToolResultCachePoint(client2, logger2, opts) {
+  const stack = client2?.middlewareStack;
+  if (!stack || typeof stack.add !== "function" || typeof stack.identify !== "function") {
+    logger2.warn(`${LOG_PREFIX} client has no middleware stack: cacheToolResults stays OFF for this model.`);
+    return false;
+  }
+  const already = stack.identify().some((entry) => entry.startsWith(`${TOOL_RESULT_CACHE_POINT_MIDDLEWARE} `));
+  if (already) {
+    throw new Error(
+      `${TOOL_RESULT_CACHE_POINT_MIDDLEWARE} is already registered on this Bedrock client: two models are sharing one client, which would make them share caching options.`
+    );
+  }
+  stack.add(createToolResultCachePointMiddleware(logger2, opts), {
+    step: "initialize",
+    name: TOOL_RESULT_CACHE_POINT_MIDDLEWARE
+  });
+  return true;
+}
+
 // src/nodes/LmChatAwsBedrockAdvanced/PatchedChatBedrockConverse.ts
 var NOOP_LOGGER = {
   info: () => {
@@ -175680,6 +175819,12 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     this.patchOptions = fields.patchOptions;
     this.patchLogger = fields.patchLogger ?? NOOP_LOGGER;
     this.streamUsageSink = fields.streamUsageSink;
+    if (this.patchOptions.enablePromptCaching && this.patchOptions.cacheToolResults) {
+      registerToolResultCachePoint(this.client, this.patchLogger, {
+        debug: !!this.patchOptions.enableDebugLogs,
+        label: this.model
+      });
+    }
   }
   invocationParams(invokeOptions) {
     const params = super.invocationParams(invokeOptions);
@@ -175918,7 +176063,13 @@ function createStreamCallback(config2) {
   function sendPost(url, body) {
     const headers = { "Content-Type": "application/json" };
     if (authHeaderValue) headers["x-webhook-auth"] = authHeaderValue;
-    fetchImpl(url, { method: "POST", headers, body: JSON.stringify(body) }).catch((err) => {
+    fetchImpl(url, { method: "POST", headers, body: JSON.stringify(body) }).then((res) => {
+      if (res && res.ok === false) {
+        logger2?.error?.(
+          `[streamCallback] POST rejected: streamId=${sessionId} seq=${body.seq} type=${body.type} status=${res.status}`
+        );
+      }
+    }).catch((err) => {
       logger2?.error?.(
         `[streamCallback] POST failed: streamId=${sessionId} seq=${body.seq} type=${body.type} err=${String(err)}`
       );
@@ -176383,6 +176534,18 @@ var LmChatAwsBedrockAdvancedP1 = class {
               type: "boolean",
               default: false,
               description: "Whether to add a cache point at the end of the most recent previous assistant turn. Reduces cost in multi-turn conversations by caching the growing history.",
+              displayOptions: {
+                show: {
+                  enablePromptCaching: [true]
+                }
+              }
+            },
+            {
+              displayName: "Cache Tool Results",
+              name: "cacheToolResults",
+              type: "boolean",
+              default: false,
+              description: "Whether to add a cache point right after the last tool result of each request, so the next call of the same agent turn reads every previous tool result from cache instead of paying it again as input. Pays off when a turn makes 2+ model calls after a tool; with a single call after the tool, that increment costs 25% more (cache write). Not added when the request already has 4 cache points (Bedrock maximum) \u2014 e.g. 2 System Prompt Blocks + tools + history.",
               displayOptions: {
                 show: {
                   enablePromptCaching: [true]
