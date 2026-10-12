@@ -365,6 +365,19 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 						},
 					},
 					{
+						displayName: 'Cache Tool Results',
+						name: 'cacheToolResults',
+						type: 'boolean',
+						default: false,
+						description:
+							'Whether to add a cache point right after the last tool result of each request, so the next call of the same agent turn reads every previous tool result from cache instead of paying it again as input. Pays off when a turn makes 2+ model calls after a tool; with a single call after the tool, that increment costs 25% more (cache write). Not added when the request already has 4 cache points (Bedrock maximum) — e.g. 2 System Prompt Blocks + tools + history.',
+						displayOptions: {
+							show: {
+								enablePromptCaching: [true],
+							},
+						},
+					},
+					{
 						displayName: 'System Prompt Blocks (Multi-Cachepoint)',
 						name: 'systemPromptBlocks',
 						type: 'json',
@@ -502,6 +515,7 @@ class LmChatAwsBedrockAdvancedP1 implements INodeType {
 			cacheSystemPrompt?: boolean;
 			cacheTools?: boolean;
 			cacheConversationHistory?: boolean;
+			cacheToolResults?: boolean;
 			cacheTtl?: string;
 			systemPromptBlocks?: string | string[];
 			enableDebugLogs?: boolean;
