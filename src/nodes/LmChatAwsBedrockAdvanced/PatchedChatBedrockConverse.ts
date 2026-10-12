@@ -99,6 +99,7 @@ export class PatchedChatBedrockConverse extends ChatBedrockConverse {
 		if (this.patchOptions.enablePromptCaching && this.patchOptions.cacheToolResults) {
 			registerToolResultCachePoint(this.client, this.patchLogger, {
 				debug: !!this.patchOptions.enableDebugLogs,
+				label: this.model,
 			});
 		}
 	}

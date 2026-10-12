@@ -2,7 +2,8 @@
  * Golden of the wire payload: "byte for byte what we send today".
  *
  * The fixture was generated from the UNMODIFIED code of v0.10.0-alpha.9 (commit
- * 6baaf8e) with `UPDATE_GOLDEN=1 npx vitest run payloadGolden`. It must never
+ * 6baaf8e) with `UPDATE_GOLDEN=1 npx vitest run payloadGolden` run in a detached
+ * worktree of that commit (the run always FAILS on purpose). It must never
  * be regenerated to make a test pass: a diff here means the request that every
  * Bedrock engine sends has changed. That is only acceptable when the change is
  * intended and reviewed (flock#1575: with `cacheToolResults` off or absent, it
@@ -23,6 +24,7 @@ const ROUTES: Route[] = ['nonStreaming', 'streaming'];
 const CONFIGS: Record<string, PatchOptions> = {
 	noCaching: {},
 	prod: PROD_OPTIONS,
+	prod1h: { ...PROD_OPTIONS, cacheTtl: '1h' },
 	prodToolResultsOff: { ...PROD_OPTIONS, cacheToolResults: false } as PatchOptions,
 	builder: BUILDER_OPTIONS,
 };
@@ -44,6 +46,8 @@ describe('wire payload golden (alpha.9)', () => {
 		const actual = await captureAll();
 		if (process.env.UPDATE_GOLDEN === '1') {
 			writeFileSync(FIXTURE, JSON.stringify(actual, null, '\t') + '\n');
+			// Never green while regenerating: a regenerated golden proves nothing.
+			expect.fail('golden regenerated — check it was produced from alpha.9 code, then rerun without UPDATE_GOLDEN');
 		}
 		expect(existsSync(FIXTURE), `missing fixture ${FIXTURE}`).toBe(true);
 		const golden = JSON.parse(readFileSync(FIXTURE, 'utf8'));

@@ -84,45 +84,124 @@ export function planToolResultCachePoint(input: any): ToolResultCachePlan {
 	return { action: 'add', input: { ...input, messages: [...messages.slice(0, -1), newLast] }, points: points + 1 };
 }
 
+/** JSON for hashing only: binary payloads (images, documents) are replaced by their size. */
+const hashReplacer = (_key: string, value: any) => {
+	if (value instanceof Uint8Array) return `<bytes:${value.length}>`;
+	if (value && value.type === 'Buffer' && Array.isArray(value.data)) return `<bytes:${value.data.length}>`;
+	return value;
+};
+
 const shortHash = (value: unknown): string =>
-	createHash('sha256').update(JSON.stringify(value) ?? '').digest('hex').slice(0, 10);
+	createHash('sha256').update(JSON.stringify(value, hashReplacer) ?? '').digest('hex').slice(0, 10);
+
+/** Shape of a request, for diagnostics. Never includes content. */
+function describeShape(input: any): string {
+	const messages = input?.messages;
+	const last = Array.isArray(messages) ? messages[messages.length - 1] : undefined;
+	const lastContent = last?.content;
+	return (
+		`keys=[${input && typeof input === 'object' ? Object.keys(input).join(',') : typeof input}] ` +
+		`messages=${Array.isArray(messages) ? messages.length : typeof messages} lastRole=${last?.role} ` +
+		`lastContent=${Array.isArray(lastContent) ? `array(${lastContent.length})` : typeof lastContent}`
+	);
+}
+
+function describeError(err: unknown): string {
+	const e = err as Error;
+	const where = typeof e?.stack === 'string' ? e.stack.split('\n')[1]?.trim() : undefined;
+	return `${e?.name ?? 'Error'}: ${e?.message ?? String(err)}${where ? ` (${where})` : ''}`;
+}
+
+const hasToolResult = (message: any): boolean =>
+	Array.isArray(message?.content) && message.content.some((b: any) => b && typeof b === 'object' && 'toolResult' in b);
 
 /**
- * The middleware itself. One per model instance: the "warn once" state lives in
- * this closure. It must never break a request — any unexpected failure degrades
- * to sending the original request, and says so.
+ * The middleware itself. One per model instance (≈ one N8N execution): the
+ * "once" state lives in this closure.
+ *
+ * Two promises, both tested:
+ *  - It never breaks a request. Any unexpected failure sends the original
+ *    request; diagnostics are best-effort and isolated from the request path.
+ *  - With the option on it is never silent in production (no debug needed):
+ *    one `info` the first time it works, and one `warn` per anomaly kind —
+ *    budget full, malformed request, tool results that are not in the last
+ *    message, unknown command context, internal error.
  */
 export function createToolResultCachePointMiddleware(
 	logger: ToolResultCacheLogger,
-	opts: { debug: boolean },
+	opts: { debug: boolean; label?: string },
 ) {
-	let budgetWarned = false;
+	const tag = `${LOG_PREFIX}${opts.label ? ` [${opts.label}]` : ''}`;
+	const said = new Set<string>();
+	const once = (key: string, emit: () => void) => {
+		if (said.has(key)) return;
+		said.add(key);
+		emit();
+	};
+
+	const report = (plan: ToolResultCachePlan, commandName: string, input: any) => {
+		if (plan.action === 'add') {
+			once('active', () =>
+				logger.info(`${tag} active: cache point added after the tool results (${plan.points} cache points in the request).`),
+			);
+		} else if (plan.reason === 'budget') {
+			once('budget', () =>
+				logger.warn(
+					`${tag} not added: the request already has ${plan.points} cache points and Bedrock allows ${MAX_CACHEPOINTS}. ` +
+						'Typical cause: 2 systemPromptBlocks + tools + history (Builder/Onboarding). Warned once per model instance.',
+				),
+			);
+		} else if (plan.reason === 'bad-shape') {
+			once('bad-shape', () =>
+				logger.warn(`${tag} ${commandName}: unexpected request shape, nothing added (warned once): ${describeShape(input)}`),
+			);
+		} else if (plan.reason === 'no-toolResult' && Array.isArray(input?.messages) && input.messages.slice(0, -1).some(hasToolResult)) {
+			once('tool-results-not-last', () =>
+				logger.warn(
+					`${tag} ${commandName}: the request has tool results but its last message does not, so nothing was cached ` +
+						`(something is appended after the tool messages; warned once): ${describeShape(input)}`,
+				),
+			);
+		}
+
+		if (opts.debug) {
+			const sent = plan.action === 'add' ? plan.input : input;
+			const hashes = Array.isArray(sent?.messages) ? sent.messages.map(shortHash) : [];
+			logger.info(
+				`${tag} ${commandName} decision=${plan.action === 'add' ? 'add' : `skip:${plan.reason}`} ` +
+					`points=${countCachePoints(sent)} msgHashes=[${hashes.join(',')}]`,
+			);
+		}
+	};
+
 	return (next: (args: any) => Promise<any>, context: { commandName?: string }) => async (args: any) => {
-		if (!CONVERSE_COMMANDS.has(context?.commandName ?? '')) return next(args);
+		const commandName = context?.commandName;
+		if (!CONVERSE_COMMANDS.has(commandName ?? '')) {
+			if (commandName === undefined) {
+				once('no-command', () =>
+					logger.warn(`${tag} middleware context has no commandName: request sent unchanged, nothing cached (warned once).`),
+				);
+			}
+			return next(args);
+		}
 
 		let plan: ToolResultCachePlan;
 		try {
 			plan = planToolResultCachePoint(args.input);
 		} catch (err) {
-			logger.warn(`${LOG_PREFIX} unexpected error, request sent unchanged: ${(err as Error)?.message ?? err}`);
+			once('error', () =>
+				logger.warn(
+					`${tag} ${commandName}: unexpected error, request sent unchanged and nothing cached for it ` +
+						`(further errors in this instance are not logged): ${describeError(err)}`,
+				),
+			);
 			return next(args);
 		}
 
-		if (plan.action === 'skip' && plan.reason === 'budget' && !budgetWarned) {
-			budgetWarned = true;
-			logger.warn(
-				`${LOG_PREFIX} not added: the request already has ${plan.points} cache points and Bedrock allows ${MAX_CACHEPOINTS}. ` +
-					'Typical cause: 2 systemPromptBlocks + tools + history (Builder/Onboarding). Warned once per model instance.',
-			);
-		}
-
-		if (opts.debug) {
-			const sent = plan.action === 'add' ? plan.input : args.input;
-			const hashes = Array.isArray(sent?.messages) ? sent.messages.map(shortHash) : [];
-			logger.info(
-				`${LOG_PREFIX} ${context.commandName} decision=${plan.action === 'add' ? 'add' : `skip:${plan.reason}`} ` +
-					`points=${countCachePoints(sent)} msgHashes=[${hashes.join(',')}]`,
-			);
+		try {
+			report(plan, commandName as string, args.input);
+		} catch {
+			// Diagnostics are best-effort: they must never stop the request.
 		}
 
 		return plan.action === 'add' ? next({ ...args, input: plan.input }) : next(args);
@@ -143,7 +222,7 @@ export function createToolResultCachePointMiddleware(
 export function registerToolResultCachePoint(
 	client: any,
 	logger: ToolResultCacheLogger,
-	opts: { debug: boolean },
+	opts: { debug: boolean; label?: string },
 ): boolean {
 	const stack = client?.middlewareStack;
 	if (!stack || typeof stack.add !== 'function' || typeof stack.identify !== 'function') {

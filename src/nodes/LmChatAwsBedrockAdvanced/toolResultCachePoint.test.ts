@@ -136,3 +136,92 @@ describe('createToolResultCachePointMiddleware', () => {
 		expect(logger.warn).toHaveBeenCalled();
 	});
 });
+
+describe('createToolResultCachePointMiddleware — never silent in production (no debug)', () => {
+	const mkLogger = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+	const call = async (mw: any, commandName: string | undefined, input: any) => {
+		const next = vi.fn(async (a: any) => a);
+		const args = { input };
+		await mw(next, { commandName })(args);
+		return { passed: next.mock.calls[0][0], args };
+	};
+	const said = (fn: any, re: RegExp) => fn.mock.calls.filter(([m]: [string]) => re.test(m));
+
+	it('first successful add leaves ONE info line per instance, with the model label', async () => {
+		const log = mkLogger();
+		const mw = createToolResultCachePointMiddleware(log, { debug: false, label: 'eu.model' });
+		for (let i = 0; i < 3; i++) await call(mw, 'ConverseCommand', baseInput());
+		const lines = said(log.info, /active/);
+		expect(lines).toHaveLength(1);
+		expect(lines[0][0]).toContain('[eu.model]');
+	});
+
+	it('malformed Converse request: ONE warn with shape diagnostics and no content', async () => {
+		const log = mkLogger();
+		const mw = createToolResultCachePointMiddleware(log, { debug: false });
+		const bad = { modelId: 'm', messages: [{ role: 'user', content: 'texto secreto' }] };
+		await call(mw, 'ConverseCommand', bad);
+		await call(mw, 'ConverseCommand', bad);
+		const warns = said(log.warn, /shape/);
+		expect(warns).toHaveLength(1);
+		expect(warns[0][0]).toMatch(/lastContent=string/);
+		expect(warns[0][0]).not.toContain('texto secreto');
+	});
+
+	it('tool results present but not in the last message: ONE warn (cache would silently do nothing)', async () => {
+		const log = mkLogger();
+		const mw = createToolResultCachePointMiddleware(log, { debug: false });
+		const input = baseInput();
+		input.messages.push({ role: 'user', content: [{ text: 'recordatorio' }] } as any);
+		await call(mw, 'ConverseCommand', input);
+		await call(mw, 'ConverseCommand', input);
+		expect(said(log.warn, /last message does not/)).toHaveLength(1);
+	});
+
+	it('first call of a turn (no tool results anywhere) is legitimately quiet', async () => {
+		const log = mkLogger();
+		const mw = createToolResultCachePointMiddleware(log, { debug: false });
+		const input = baseInput();
+		input.messages = [input.messages[0]];
+		await call(mw, 'ConverseCommand', input);
+		expect(log.warn).not.toHaveBeenCalled();
+		expect(log.info).not.toHaveBeenCalled();
+	});
+
+	it('missing commandName: request untouched, ONE warn', async () => {
+		const log = mkLogger();
+		const mw = createToolResultCachePointMiddleware(log, { debug: false });
+		const { passed, args } = await call(mw, undefined, baseInput());
+		await call(mw, undefined, baseInput());
+		expect(passed).toBe(args);
+		expect(said(log.warn, /commandName/)).toHaveLength(1);
+	});
+
+	it('internal error: warned ONCE per instance with the command name, request untouched', async () => {
+		const log = mkLogger();
+		const mw = createToolResultCachePointMiddleware(log, { debug: false });
+		const evil = () => { const e = baseInput(); Object.defineProperty(e, 'messages', { get() { throw new Error('boom'); } }); return e; };
+		await call(mw, 'ConverseStreamCommand', evil());
+		await call(mw, 'ConverseStreamCommand', evil());
+		const warns = said(log.warn, /unexpected error/);
+		expect(warns).toHaveLength(1);
+		expect(warns[0][0]).toMatch(/ConverseStreamCommand.*boom/);
+	});
+
+	it('a logger that throws never stops the request (diagnostics are best-effort)', async () => {
+		const log = { info: vi.fn(() => { throw new Error('logger down'); }), warn: vi.fn(() => { throw new Error('logger down'); }) };
+		const mw = createToolResultCachePointMiddleware(log, { debug: true });
+		const { passed } = await call(mw, 'ConverseCommand', baseInput());
+		expect(passed.input.messages.at(-1).content.at(-1)).toEqual(CP);
+	});
+
+	it('debug hashing survives binary payloads (documents/images as bytes)', async () => {
+		const log = mkLogger();
+		const mw = createToolResultCachePointMiddleware(log, { debug: true });
+		const input = baseInput();
+		input.messages[0].content.unshift({ document: { name: 'd', format: 'pdf', source: { bytes: new Uint8Array(5_000_000) } } } as any);
+		const { passed } = await call(mw, 'ConverseCommand', input);
+		expect(passed.input.messages.at(-1).content.at(-1)).toEqual(CP);
+		expect(said(log.info, /decision=add/)).toHaveLength(1);
+	});
+});

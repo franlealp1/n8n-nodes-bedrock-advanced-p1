@@ -175695,30 +175695,92 @@ function planToolResultCachePoint(input) {
   const newLast = { ...last, content: [...last.content, { cachePoint: { type: "default" } }] };
   return { action: "add", input: { ...input, messages: [...messages.slice(0, -1), newLast] }, points: points + 1 };
 }
-var shortHash = (value) => (0, import_node_crypto8.createHash)("sha256").update(JSON.stringify(value) ?? "").digest("hex").slice(0, 10);
+var hashReplacer = (_key, value) => {
+  if (value instanceof Uint8Array) return `<bytes:${value.length}>`;
+  if (value && value.type === "Buffer" && Array.isArray(value.data)) return `<bytes:${value.data.length}>`;
+  return value;
+};
+var shortHash = (value) => (0, import_node_crypto8.createHash)("sha256").update(JSON.stringify(value, hashReplacer) ?? "").digest("hex").slice(0, 10);
+function describeShape(input) {
+  const messages = input?.messages;
+  const last = Array.isArray(messages) ? messages[messages.length - 1] : void 0;
+  const lastContent = last?.content;
+  return `keys=[${input && typeof input === "object" ? Object.keys(input).join(",") : typeof input}] messages=${Array.isArray(messages) ? messages.length : typeof messages} lastRole=${last?.role} lastContent=${Array.isArray(lastContent) ? `array(${lastContent.length})` : typeof lastContent}`;
+}
+function describeError(err) {
+  const e5 = err;
+  const where = typeof e5?.stack === "string" ? e5.stack.split("\n")[1]?.trim() : void 0;
+  return `${e5?.name ?? "Error"}: ${e5?.message ?? String(err)}${where ? ` (${where})` : ""}`;
+}
+var hasToolResult = (message) => Array.isArray(message?.content) && message.content.some((b5) => b5 && typeof b5 === "object" && "toolResult" in b5);
 function createToolResultCachePointMiddleware(logger2, opts) {
-  let budgetWarned = false;
+  const tag2 = `${LOG_PREFIX}${opts.label ? ` [${opts.label}]` : ""}`;
+  const said = /* @__PURE__ */ new Set();
+  const once = (key, emit) => {
+    if (said.has(key)) return;
+    said.add(key);
+    emit();
+  };
+  const report = (plan, commandName, input) => {
+    if (plan.action === "add") {
+      once(
+        "active",
+        () => logger2.info(`${tag2} active: cache point added after the tool results (${plan.points} cache points in the request).`)
+      );
+    } else if (plan.reason === "budget") {
+      once(
+        "budget",
+        () => logger2.warn(
+          `${tag2} not added: the request already has ${plan.points} cache points and Bedrock allows ${MAX_CACHEPOINTS}. Typical cause: 2 systemPromptBlocks + tools + history (Builder/Onboarding). Warned once per model instance.`
+        )
+      );
+    } else if (plan.reason === "bad-shape") {
+      once(
+        "bad-shape",
+        () => logger2.warn(`${tag2} ${commandName}: unexpected request shape, nothing added (warned once): ${describeShape(input)}`)
+      );
+    } else if (plan.reason === "no-toolResult" && Array.isArray(input?.messages) && input.messages.slice(0, -1).some(hasToolResult)) {
+      once(
+        "tool-results-not-last",
+        () => logger2.warn(
+          `${tag2} ${commandName}: the request has tool results but its last message does not, so nothing was cached (something is appended after the tool messages; warned once): ${describeShape(input)}`
+        )
+      );
+    }
+    if (opts.debug) {
+      const sent = plan.action === "add" ? plan.input : input;
+      const hashes = Array.isArray(sent?.messages) ? sent.messages.map(shortHash) : [];
+      logger2.info(
+        `${tag2} ${commandName} decision=${plan.action === "add" ? "add" : `skip:${plan.reason}`} points=${countCachePoints(sent)} msgHashes=[${hashes.join(",")}]`
+      );
+    }
+  };
   return (next, context) => async (args) => {
-    if (!CONVERSE_COMMANDS.has(context?.commandName ?? "")) return next(args);
+    const commandName = context?.commandName;
+    if (!CONVERSE_COMMANDS.has(commandName ?? "")) {
+      if (commandName === void 0) {
+        once(
+          "no-command",
+          () => logger2.warn(`${tag2} middleware context has no commandName: request sent unchanged, nothing cached (warned once).`)
+        );
+      }
+      return next(args);
+    }
     let plan;
     try {
       plan = planToolResultCachePoint(args.input);
     } catch (err) {
-      logger2.warn(`${LOG_PREFIX} unexpected error, request sent unchanged: ${err?.message ?? err}`);
+      once(
+        "error",
+        () => logger2.warn(
+          `${tag2} ${commandName}: unexpected error, request sent unchanged and nothing cached for it (further errors in this instance are not logged): ${describeError(err)}`
+        )
+      );
       return next(args);
     }
-    if (plan.action === "skip" && plan.reason === "budget" && !budgetWarned) {
-      budgetWarned = true;
-      logger2.warn(
-        `${LOG_PREFIX} not added: the request already has ${plan.points} cache points and Bedrock allows ${MAX_CACHEPOINTS}. Typical cause: 2 systemPromptBlocks + tools + history (Builder/Onboarding). Warned once per model instance.`
-      );
-    }
-    if (opts.debug) {
-      const sent = plan.action === "add" ? plan.input : args.input;
-      const hashes = Array.isArray(sent?.messages) ? sent.messages.map(shortHash) : [];
-      logger2.info(
-        `${LOG_PREFIX} ${context.commandName} decision=${plan.action === "add" ? "add" : `skip:${plan.reason}`} points=${countCachePoints(sent)} msgHashes=[${hashes.join(",")}]`
-      );
+    try {
+      report(plan, commandName, args.input);
+    } catch {
     }
     return plan.action === "add" ? next({ ...args, input: plan.input }) : next(args);
   };
@@ -175759,7 +175821,8 @@ var PatchedChatBedrockConverse = class extends ChatBedrockConverse {
     this.streamUsageSink = fields.streamUsageSink;
     if (this.patchOptions.enablePromptCaching && this.patchOptions.cacheToolResults) {
       registerToolResultCachePoint(this.client, this.patchLogger, {
-        debug: !!this.patchOptions.enableDebugLogs
+        debug: !!this.patchOptions.enableDebugLogs,
+        label: this.model
       });
     }
   }
