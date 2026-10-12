@@ -170,3 +170,15 @@ describe('response path untouched (#633 metrics)', () => {
 		expect(on.usage_metadata.input_token_details).toEqual({ cache_read: 11048, cache_creation: 507 });
 	});
 });
+
+describe('log attribution', () => {
+	it('warnings from a real model name the model, so they can be traced in a worker log', async () => {
+		const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+		const cap = captureClient();
+		const model = makeCaptureModel('nonStreaming', { ...ON, systemPromptBlocks: '["' + 'a '.repeat(2100) + '","' + 'b '.repeat(2100) + '"]' }, cap.client, log);
+		await expectSentinel(model.bindTools(TOOLS as any).invoke(CONVERSATIONS.oneToolResult()));
+		const budget = log.warn.mock.calls.map(([m]) => String(m)).filter((m) => /toolResultCache/.test(m));
+		expect(budget).toHaveLength(1);
+		expect(budget[0]).toContain(`[${MODEL_ID}]`);
+	});
+});
